@@ -39,8 +39,29 @@ def test_langchain_provider_delegates_embed_documents() -> None:
     assert init.call_args.kwargs["provider"] == "openai"
     assert init.call_args.kwargs["base_url"] == "https://example.com/v1"
     assert init.call_args.kwargs["api_key"] == "sk"
+    assert init.call_args.kwargs["check_embedding_ctx_length"] is False  # 发原始文本（百炼不认 token 化输入）
     assert fake.calls == [["a", "b"]]
     assert vectors == [[0.1, 0.2], [0.1, 0.2]]
+
+
+def test_langchain_provider_retries_without_ctx_kwarg_on_type_error() -> None:
+    """部分 provider 不接受 check_embedding_ctx_length：TypeError 时去掉参数重试。"""
+    fake = _FakeEmbeddings()
+    calls: list[dict] = []
+
+    def _init(model: str, **kwargs):
+        calls.append(kwargs)
+        if "check_embedding_ctx_length" in kwargs:
+            raise TypeError("unexpected keyword argument 'check_embedding_ctx_length'")
+        return fake
+
+    with mock.patch("langchain.embeddings.init_embeddings", side_effect=_init):
+        provider = LangChainEmbeddingProvider(
+            model="bge-m3", provider="ollama", base_url="http://127.0.0.1:11434/v1", api_key=None
+        )
+        assert provider.embed_texts(["a"]) == [[0.1, 0.2]]
+    assert len(calls) == 2
+    assert "check_embedding_ctx_length" not in calls[1]
 
 
 def test_langchain_provider_batches_generic_limit() -> None:

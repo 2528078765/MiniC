@@ -61,12 +61,20 @@ class LangChainEmbeddingProvider:
     def __init__(self, model: str, provider: str, base_url: str, api_key: str | None) -> None:
         from langchain.embeddings import init_embeddings
 
-        kwargs: dict[str, Any] = {}
+        # check_embedding_ctx_length=False：OpenAI 兼容端点发原始文本——
+        # langchain-openai 1.4 默认预 token 化（input 变成数字数组 + base64），
+        # 百炼等兼容端点不认识（400 contents is neither str nor list of str）
+        kwargs: dict[str, Any] = {"check_embedding_ctx_length": False}
         if base_url:
             kwargs["base_url"] = base_url
         if api_key:
             kwargs["api_key"] = api_key
-        self._embeddings = init_embeddings(model, provider=provider, **kwargs)
+        try:
+            self._embeddings = init_embeddings(model, provider=provider, **kwargs)
+        except TypeError:
+            # 其他 provider 不认识该参数（如 ollama/cohere）：去掉后重试
+            kwargs.pop("check_embedding_ctx_length", None)
+            self._embeddings = init_embeddings(model, provider=provider, **kwargs)
 
     def embed_texts(self, texts: list[str], text_type: str = "document") -> list[list[float]]:
         """按批向量化（单批条数不超过各家接口上限）。"""

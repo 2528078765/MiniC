@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "minic"
-version = "0.0.4"
+version = "0.0.5"
 description = "MiniC 本地优先 DeepAgent：RAG 知识库问答、文件/Git/命令工具与审批、会话与长期记忆、MCP/SKILL/子 Agent、崩溃恢复"
 readme = "README.md"
 requires-python = ">=3.13"
