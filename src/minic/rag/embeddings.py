@@ -56,7 +56,7 @@ class LangChainEmbeddingProvider:
     ``base_url`` / ``api_key`` 同样透传，不做任何供应商特判。
     """
 
-    _BATCH_SIZE = 25  # 通用分批：各家接口单批上限不同（如百炼兼容模式 25 条）
+    _BATCH_SIZE = 10  # 通用分批：各家接口单批上限不同（百炼兼容模式实测上限 10 条）
 
     def __init__(self, model: str, provider: str, base_url: str, api_key: str | None) -> None:
         from langchain.embeddings import init_embeddings

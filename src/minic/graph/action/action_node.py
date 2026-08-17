@@ -306,13 +306,21 @@ def should_continue(state: ChatState) -> str:  # ReAct 条件边
     return "answer"  # 进入回答
 
 
+_TOOL_NULL_MARKER = re.compile(r'^\s*\{\s*"tool"\s*:\s*null\s*\}\s*$')  # 旧纯文本协议空调用标记
+
+
 def _extract_final_answer(state: ChatState) -> str:  # 提取最终回答
-    """从 ReAct 消息列表提取 agent 最终回答文本（最后一条无 tool_calls 的 AIMessage）。"""
+    """从 ReAct 消息列表提取 agent 最终回答文本（最后一条无 tool_calls 的 AIMessage）。
+
+    模型偶发输出旧协议标记 ``{"tool": null}`` 时视为空回答并跳过，
+    由回答节点兜底重新生成（不在界面上显示裸标记）。
+    """
     messages = state.get("messages") or []  # 消息列表
     for message in reversed(messages):  # 从后往前
         if isinstance(message, AIMessage) and not message.tool_calls:  # 最终回答轮
-            if getattr(message, "content", ""):  # 有文本
-                return str(message.content)  # 返回最终回答
+            content = str(getattr(message, "content", "") or "").strip()  # 回答文本
+            if content and not _TOOL_NULL_MARKER.match(content):  # 有效文本
+                return content  # 返回最终回答
     return ""  # 未产出文本
 
 

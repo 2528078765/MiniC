@@ -9,11 +9,11 @@ MiniC 提供两种形态：
 
 > English README: [README.en.md](README.en.md)
 
-## 桌面端安装（v0.0.3）
+## 桌面端安装（v0.0.4）
 
 ### 方式一：安装包（推荐）
 
-1. 前往 [Releases](https://github.com/2528078765/MiniC/releases) 下载 `MiniC-Setup-0.0.3.exe`（版本 0.0.3）。
+1. 前往 [Releases](https://github.com/2528078765/MiniC/releases) 下载 `MiniC-Setup-0.0.4.exe`（版本 0.0.4）。
 2. 双击安装：自动创建开始菜单与桌面快捷方式，附卸载程序；默认装到用户目录（免管理员权限），也可选择安装给所有用户。
 3. 安装完成后双击 MiniC 图标启动：**核心服务内嵌在桌面端进程内自动拉起**，不需要命令行、不需要单独启动任何服务。
 4. 首次启动自动生成 `~/.minic/minic.json`（完整默认配置模板，含全部字段）——**无需手写配置**；进入「设置 → 模型设置」填写 Provider（供应商名称）、Base URL、模型、API Key 并保存即可对话（保存时核心若未启动完会自动等待；配置明文仅存本机，不入库、不上传）。
@@ -21,7 +21,7 @@ MiniC 提供两种形态：
 
 ### 方式二：绿色版（免安装）
 
-- 下载 `MiniC-0.0.3-windows-x64.exe`，双击即用（不写注册表、无需安装）；其余使用方式同上。
+- 下载 `MiniC-0.0.4-windows-x64.exe`，双击即用（不写注册表、无需安装）；其余使用方式同上。
 
 ### 安装包说明
 
@@ -92,7 +92,7 @@ cd MiniC
 ```powershell
 .\.venv\Scripts\python.exe scripts\make_icon.py          # 生成 icon/Log.ico
 .\.venv\Scripts\pyinstaller.exe packaging\MiniC.spec --noconfirm --clean
-ISCC.exe packaging\MiniC.iss                             # 生成安装包 dist\MiniC-Setup-0.0.3.exe（Inno Setup 6）
+ISCC.exe packaging\MiniC.iss                             # 生成安装包 dist\MiniC-Setup-0.0.4.exe（Inno Setup 6）
 ```
 
 ## CLI 使用

@@ -44,17 +44,17 @@ def test_langchain_provider_delegates_embed_documents() -> None:
 
 
 def test_langchain_provider_batches_generic_limit() -> None:
-    """超过 25 条按 25 一批拆分（各家接口单批上限不同，统一通用分批）。"""
+    """超过 10 条按 10 一批拆分（百炼兼容模式实测单批上限 10 条）。"""
     fake = _FakeEmbeddings()
     with mock.patch("langchain.embeddings.init_embeddings", return_value=fake):
         provider = LangChainEmbeddingProvider(
             model="m", provider="openai", base_url="https://example.com/v1", api_key="sk"
         )
-        texts = [f"t{i}" for i in range(60)]
+        texts = [f"t{i}" for i in range(25)]
         vectors = provider.embed_texts(texts)
 
-    assert [len(batch) for batch in fake.calls] == [25, 25, 10]
-    assert len(vectors) == 60
+    assert [len(batch) for batch in fake.calls] == [10, 10, 5]
+    assert len(vectors) == 25
 
 
 def test_langchain_provider_omits_empty_base_url_and_key() -> None:

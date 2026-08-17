@@ -241,8 +241,16 @@ class ModelRegistry:
         return self._ctx.set(name)
 
     def reset(self, token: contextvars.Token) -> None:
-        """恢复上一个请求级模型选择。"""
-        self._ctx.reset(token)
+        """恢复上一个请求级模型选择。
+
+        流式生成器可能在其他 asyncio Context 中消费（token 在请求上下文创建），
+        跨 Context reset 会抛 ValueError；该上下文随任务结束而释放，选择自然
+        失效，此处吞掉即可（会话级选择依赖 contextvar 的上下文隔离）。
+        """
+        try:
+            self._ctx.reset(token)
+        except ValueError:
+            pass  # token 创建于其他 Context：随该上下文销毁，无需重置
 
     def current(self) -> Any:
         """当前模型实例（缺省第一个启用模型）。

@@ -216,9 +216,9 @@ def tool_system_prompt() -> str:  # 生成工具调用系统提示
         "请使用 Windows 命令与路径（dir、type、echo、C:\\Users\\<用户名>），"  # Windows 命令
         "用户主目录可用命令 `echo %USERPROFILE%` 获取，"  # 主目录获取方式
         "不要使用 ls、~、/home、/dev 等 Linux 语法。\n"  # 禁止 Linux 语法
-        "需要调用工具时只输出 JSON：{\"tool\": \"工具名\", \"args\": {参数}}；"  # 输出格式
-        "不需要调用时输出：{\"tool\": null}。不要输出其他内容，"  # 空调用格式
-        "禁止输出 DSML、XML 或其他工具调用标记。"  # 输出约束
+        "需要调用工具时使用函数调用（function calling）；"  # 原生工具调用
+        "不需要调用工具时直接用自然语言回答用户，"  # 直接回答
+        "不要输出 JSON、DSML、XML 等任何工具调用标记。"  # 输出约束
     )  # 提示结束
 
 
