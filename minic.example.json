@@ -1,0 +1,61 @@
+{
+  "model": {
+    "provider": "deepseek",
+    "base_url": "https://api.deepseek.com",
+    "model": "deepseek-v4-flash",
+    "temperature": 0.7,
+    "context_length": null
+  },
+  "embedding": {
+    "provider": "dashscope",
+    "base_url": "https://dashscope.aliyuncs.com",
+    "model": "text-embedding-v3",
+    "dimension": 1024
+  },
+  "rag": {
+    "chunk_size": 500,
+    "chunk_overlap": 100,
+    "top_k": 5,
+    "bm25_weight": 0.45,
+    "vector_weight": 0.55,
+    "auto_ingest_paths": [],
+    "default_directory": null,
+    "data_dir": null,
+    "knowledge_base_paths": []
+  },
+  "approval": {
+    "workspace_read_auto_approve": true,
+    "workspace_write_auto_approve": false,
+    "expiry_seconds": 300
+  },
+  "sandbox": {
+    "command_timeout": 60,
+    "model_api_whitelist": [
+      "http://127.0.0.1:11434",
+      "api.deepseek.com",
+      "dashscope.aliyuncs.com"
+    ],
+    "default_level": "workspace-write",
+    "summarize_threshold_chars": 12000,
+    "high_risk_patterns": [
+      "rm -rf /",
+      "rm -rf ~",
+      "format c:",
+      "del /f /s /q c:",
+      "shutdown /",
+      "taskkill /f /im"
+    ],
+    "allowed_write_dirs": []
+  },
+  "memory": {
+    "long_term_inject_threshold_tokens": 4000
+  },
+  "rate_limit": {
+    "max_requests": 120,
+    "window_seconds": 60
+  },
+  "subagent": {
+    "max_concurrent": 3,
+    "timeout_seconds": 120
+  }
+}
