@@ -201,9 +201,8 @@ def _build_models(settings: AppSettings) -> tuple[dict[str, Any], str]:
             models[cfg.name] = init_chat_model(cfg.model, **kwargs)  # 按配置创建真实聊天模型
         except Exception as exc:  # noqa: BLE001 - 未就绪模型降级为禁用态，调用时报明确错误
             models[cfg.name] = DisabledChatModel(name=cfg.name, reason=str(exc))
-    if not models:  # 全禁用/空配置兜底
-        models["mock"] = MockChatModel()  # 保证可用
-    default_name = settings.model.primary().name  # 默认模型名
+    # 空配置不回退 mock：未配置模型时由 ModelRegistry.current 报明确错误
+    default_name = settings.model.primary().name if models else ""  # 默认模型名
     return models, default_name
 
 
@@ -246,7 +245,12 @@ class ModelRegistry:
         self._ctx.reset(token)
 
     def current(self) -> Any:
-        """当前模型实例（缺省第一个启用模型）。"""
+        """当前模型实例（缺省第一个启用模型）。
+
+        未配置任何模型时抛明确错误（不再回退 mock 假模型）。
+        """
+        if not self._models:
+            raise RuntimeError("未配置任何模型，请先在「设置 → 模型设置」中添加模型供应商")
         name = self._ctx.get()
         return self._models.get(name) or self._models[self._default_name]
 

@@ -92,3 +92,11 @@ def test_factory_unknown_provider_returns_disabled() -> None:
     )
     provider = create_embedding_provider(settings)
     assert isinstance(provider, DisabledEmbeddingProvider)
+
+
+def test_factory_empty_provider_returns_disabled() -> None:
+    """0.0.2 默认全空：provider 为空时降级为禁用态并给出配置指引。"""
+    settings = AppSettings(embedding={"provider": "", "base_url": "", "model": "", "api_key": None})
+    provider = create_embedding_provider(settings)
+    assert isinstance(provider, DisabledEmbeddingProvider)
+    assert "设置 → 模型设置 → Embedding" in provider.reason

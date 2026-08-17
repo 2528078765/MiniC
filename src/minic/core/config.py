@@ -26,10 +26,11 @@ class ModelConfig(BaseModel):
 class ModelSettings(BaseModel):
     """模型配置：多个模型/供应商列表（每项带 enabled 开关）。
 
+    默认空列表——不内置任何供应商，全部由用户自行添加（0.0.2 起）。
     兼容旧版单对象格式：读取到单对象 dict 时自动包成单元素列表。
     """
 
-    models: list[ModelConfig] = Field(default_factory=lambda: [ModelConfig()])
+    models: list[ModelConfig] = Field(default_factory=list)
 
     @model_validator(mode="before")
     @classmethod
@@ -49,7 +50,7 @@ class ModelSettings(BaseModel):
                     extra.setdefault("enabled", True)
                     values = {"models": [extra]}
                 else:
-                    values = {"models": [ModelConfig()]}
+                    values = {"models": []}
             elif extra and isinstance(models, list):
                 if models and isinstance(models[0], dict):
                     first = dict(models[0])
@@ -77,9 +78,9 @@ class EmbeddingSettings(BaseModel):
     azure_openai 等）；默认 openai 走百炼 OpenAI 兼容接口。
     """
 
-    provider: str = "openai"
-    base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-    model: str = "text-embedding-v3"
+    provider: str = ""
+    base_url: str = ""
+    model: str = ""
     dimension: int = 1024
     api_key: str | None = None
 
@@ -127,6 +128,7 @@ class SandboxSettings(BaseModel):
         "127.0.0.1",
         "localhost",
         "api.deepseek.com",
+        "api.openai.com",
         "dashscope.aliyuncs.com",
         "api.moonshot.cn",
         "open.bigmodel.cn",

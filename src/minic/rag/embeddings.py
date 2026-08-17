@@ -110,6 +110,10 @@ def create_embedding_provider(settings: AppSettings) -> EmbeddingProvider:
     provider = settings.embedding.provider
     if provider == "mock":
         return MockEmbeddingProvider(dimension=settings.embedding.dimension)
+    if not provider:
+        return DisabledEmbeddingProvider(
+            "未配置 embedding provider（设置 → 模型设置 → Embedding）"
+        )
     try:
         return LangChainEmbeddingProvider(
             model=settings.embedding.model,

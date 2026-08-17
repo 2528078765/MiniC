@@ -6,6 +6,7 @@ import json
 import time
 from typing import Any, Callable
 
+from PySide6 import QtCore
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QMouseEvent
 from PySide6.QtWidgets import (
@@ -29,25 +30,18 @@ from minic.gui.theme import (
     COLOR_BG_MAIN,
     COLOR_BORDER,
     COLOR_GREEN,
+    COLOR_RED,
     COLOR_TEXT_MUTED,
     COLOR_TEXT_SECONDARY,
 )
-from minic.gui.icons import load_pixmap
+from minic.gui.icons import load_icon, load_pixmap
 from minic.gui.widgets.worker import Worker
 
-# provider 显示名 → 核心 provider 取值
-_PROVIDER_LABELS = {
-    "deepseek": "DeepSeek",
-    "ollama": "Ollama（本地）",
-    "dashscope": "DashScope",
-    "zhipu": "智谱 GLM",
-}
-
-
 class ProviderItem(QFrame):
-    """供应商列表项：图标 + 名称，点击选中。"""
+    """供应商列表项：图标 + 名称 + 删除按钮，点击选中。"""
 
     clicked = Signal(str)
+    delete_requested = Signal(str)
 
     def __init__(
         self,
@@ -62,7 +56,7 @@ class ProviderItem(QFrame):
             f"#ProviderItem {{ background: transparent; border: none; border-radius: 6px; }}"
         )
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(10, 7, 10, 7)
+        layout.setContentsMargins(10, 7, 8, 7)
         layout.setSpacing(8)
 
         icon_label = QLabel(self)
@@ -76,6 +70,20 @@ class ProviderItem(QFrame):
             f"color: {COLOR_TEXT_SECONDARY}; background: transparent; border: none; font-size: 13px;"
         )
         layout.addWidget(name_label, 1)
+
+        # 删除按钮（右侧；点击不触发条目选中）
+        delete_btn = QPushButton(self)
+        delete_btn.setIcon(load_icon("删 除"))
+        delete_btn.setIconSize(QtCore.QSize(13, 13))
+        delete_btn.setFixedSize(22, 22)
+        delete_btn.setToolTip(f"删除供应商 {name}")
+        delete_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        delete_btn.setStyleSheet(
+            f"QPushButton {{ background: transparent; border: none; border-radius: 4px; }}"
+            f"QPushButton:hover {{ background-color: {COLOR_RED}; }}"
+        )
+        delete_btn.clicked.connect(lambda _checked=False, n=name: self.delete_requested.emit(n))
+        layout.addWidget(delete_btn)
 
         self.setFixedHeight(34)
 
@@ -198,8 +206,11 @@ class ModelPanel(PanelBase):
         form_layout.addWidget(form_desc)
 
         self._form_title = form_title
-        self._name_input = self._make_form_row(form_layout, "Provider", "如：DeepSeek（供应商名称）", form)
+        self._name_input = self._make_form_row(form_layout, "名称", "如：我的 DeepSeek（自定义显示名）", form)
         self._name_input.textChanged.connect(self._on_name_changed)
+        self._provider_input = self._make_form_row(
+            form_layout, "Provider", "如：deepseek / openai / ollama", form, hint="大模型供应商名，透传给模型工厂"
+        )
         self._url_input = self._make_form_row(
             form_layout, "Base URL", "https://api.example.com/v1", form, hint="使用兼容 OpenAI 的 baseurl"
         )
@@ -295,7 +306,7 @@ class ModelPanel(PanelBase):
         # 编辑分组：模型卡与 Embedding 卡各自编辑/保存；测试连接始终可点
         self.register_editable(
             add_btn,
-            self._name_input, self._url_input, self._model_input, self._key_input,
+            self._name_input, self._provider_input, self._url_input, self._model_input, self._key_input,
             self._save_btn,
         )
         self._emb_edit_widgets = [self._emb_provider, self._emb_model, self._emb_url, self._emb_key]
@@ -368,13 +379,13 @@ class ModelPanel(PanelBase):
         for entry in models:
             if not isinstance(entry, dict):
                 continue
-            name = str(entry.get("name") or "").strip()
-            if not name:  # 无名字时按 provider 显示名兜底
-                name = _PROVIDER_LABELS.get(str(entry.get("provider", "")), str(entry.get("provider", "")))
+            name = str(entry.get("name") or entry.get("provider") or "").strip()
+            if not name:
+                continue
             if name not in self._providers:
                 self._providers[name] = {
-                    "name": name,
-                    "provider": str(entry.get("provider", "deepseek")),
+                    "name": str(entry.get("name", "") or name),
+                    "provider": str(entry.get("provider", "") or ""),
                     "base_url": str(entry.get("base_url", "") or ""),
                     "model": str(entry.get("model", "") or ""),
                     "api_key": str(entry.get("api_key", "") or ""),
@@ -385,7 +396,7 @@ class ModelPanel(PanelBase):
             self._select_provider(next(iter(self._providers)))
 
         embedding_cfg = data.get("embedding") or {}
-        self._emb_provider.setText(str(embedding_cfg.get("provider", "dashscope")))
+        self._emb_provider.setText(str(embedding_cfg.get("provider", "")))
         self._emb_model.setText(str(embedding_cfg.get("model", "") or ""))
         self._emb_url.setText(str(embedding_cfg.get("base_url", "") or ""))
         self._emb_key.setText(str(embedding_cfg.get("api_key", "") or ""))  # 本地明文回显（仅本机）
@@ -409,6 +420,7 @@ class ModelPanel(PanelBase):
         for name in self._providers:
             item = ProviderItem(name, parent=self)
             item.clicked.connect(self._select_provider)
+            item.delete_requested.connect(self._delete_provider)
             item.set_active(name == self._selected)
             self._provider_layout.insertWidget(self._provider_layout.count() - 1, item)
             self._provider_items.append(item)
@@ -423,16 +435,39 @@ class ModelPanel(PanelBase):
             return
         self._form_title.setText(name)
         self._name_input.setText(provider.get("name", ""))
+        self._provider_input.setText(provider.get("provider", ""))
         self._url_input.setText(provider.get("base_url", ""))
         self._model_input.setText(provider.get("model", ""))
         self._key_input.setText(provider.get("api_key", ""))
+
+    def _delete_provider(self, name: str) -> None:
+        """删除供应商：确认后移除并立即持久化剩余配置。"""
+        from minic.gui.widgets.dialogs import ConfirmDialog
+
+        dialog = ConfirmDialog(parent=self, title="确认操作", text=f"是否删除供应商 {name}")
+        dialog.exec()
+        if not dialog.confirmed:
+            return
+        if name in self._providers:
+            self._providers.pop(name, None)
+        if self._selected == name:
+            self._selected = next(iter(self._providers), None)
+        self._render_providers()
+        if self._selected:
+            self._select_provider(self._selected)
+        else:
+            self._form_title.setText("添加模型供应商")
+            for field in (self._name_input, self._provider_input, self._url_input, self._model_input, self._key_input):
+                field.setText("")
+        self._submit_model(None)  # 立即持久化剩余供应商
+        self.notify(f"已删除供应商 {name}", "success")
 
     def _add_provider(self) -> None:
         """新增供应商条目并清空表单（默认启用）。"""
         index = len(self._providers) + 1
         name = f"新供应商 {index}"
         self._providers[name] = {
-            "name": "", "provider": "deepseek", "base_url": "",
+            "name": "", "provider": "", "base_url": "",
             "model": "", "api_key": "", "enabled": True,
         }
         self._render_providers()
@@ -461,7 +496,7 @@ class ModelPanel(PanelBase):
         name = self._name_input.text().strip() or (self._selected or "")
         provider = {
             "name": name,
-            "provider": (self._providers.get(self._selected) or {}).get("provider", "deepseek"),
+            "provider": self._provider_input.text().strip(),
             "base_url": self._url_input.text().strip(),
             "model": self._model_input.text().strip(),
             "api_key": self._key_input.text(),
@@ -481,8 +516,8 @@ class ModelPanel(PanelBase):
         返回是否已保存（False=必填字段缺失，保持编辑态）。
         """
         provider = self._collect_form()
-        if not provider["name"] or not provider["base_url"] or not provider["model"]:
-            self.toast("请填写 Provider、Base URL 与模型")
+        if not provider["name"] or not provider["provider"] or not provider["base_url"] or not provider["model"]:
+            self.toast("请填写名称、Provider、Base URL 与模型")
             return False  # 校验失败保持编辑态
         self._submit_model(provider)
         self.set_edit_mode(False)
@@ -532,6 +567,7 @@ class ModelPanel(PanelBase):
             self._selected = None
             self._form_title.setText("添加模型供应商")
             self._name_input.setText("")
+            self._provider_input.setText("")
             self._url_input.setText("")
             self._model_input.setText("")
             self._key_input.setText("")
@@ -555,8 +591,12 @@ class ModelPanel(PanelBase):
             raise RuntimeError("核心未就绪，请稍后重试")
         return client.put_settings(payload)
 
-    def _submit_model(self, provider: dict[str, Any]) -> None:
-        """提交模型配置到核心（全局 scope，models 列表含 enabled 与 api_key 明文）。"""
+    def _submit_model(self, provider: dict[str, Any] | None = None) -> None:
+        """提交模型配置到核心（全局 scope，models 列表含 enabled 与 api_key 明文）。
+
+        provider 仅供调用点语义区分（删除时传 None 只提交剩余列表）。
+        """
+        del provider  # 提交内容以注册表为准
         if self.client is None:
             self.toast("核心未运行，保存仅保留在本地")
             return
@@ -564,8 +604,8 @@ class ModelPanel(PanelBase):
         for item in self._providers.values():  # 全部供应商/模型配置一起提交
             models.append(
                 {
-                    "name": item.get("name") or item.get("display", ""),
-                    "provider": item.get("provider") or "deepseek",
+                    "name": item.get("name") or "",
+                    "provider": item.get("provider") or "",
                     "base_url": item.get("base_url", ""),
                     "model": item.get("model", ""),
                     "api_key": item.get("api_key", "") or None,
@@ -601,23 +641,73 @@ class ModelPanel(PanelBase):
         worker.start()
 
     def _test_model_connection(self) -> None:
-        """测试模型供应商连接（顶部通知条反馈：成功 xx ms / 失败原因）。"""
+        """测试模型供应商：用表单里的模型名真实发一次最小对话请求。
+
+        成功标准 = 真实请求返回成功（验证 Key + 模型名 + 端点三者都正确），
+        不是旧实现的 GET /models（只验证 Key 与端点，模型名错误也会"成功"）。
+        失败时尝试 GET /models 列出可用模型名辅助排查。
+        """
         provider = self._collect_form()
-        base_url = provider["base_url"].rstrip("/")
+        base_url = provider["base_url"].strip().rstrip("/")
+        model = provider["model"]
+        api_key = provider["api_key"]
         if not base_url:
             self.notify("测试连接失败：请先填写 Base URL", "failed")
             return
-        api_key = provider["api_key"]
+        if not model:
+            self.notify("测试连接失败：请先填写模型名", "failed")
+            return
         started = time.monotonic()
+
+        def _available_models() -> list[str]:
+            """GET {base_url}/models 列出可用模型（openai 兼容接口）。"""
+            import httpx
+
+            try:
+                headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+                with httpx.Client(timeout=10.0) as client:
+                    response = client.get(f"{base_url}/models", headers=headers)
+                    if response.status_code != 200:
+                        return []
+                    data = response.json()
+                    models = [str(item.get("id", "")) for item in data.get("data", [])]
+                    return [name for name in models if name]
+            except httpx.HTTPError:
+                return []
 
         def _test() -> bool:
             import httpx
 
             headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
-            with httpx.Client(timeout=10.0) as client:
-                response = client.get(f"{base_url}/models", headers=headers)
-                response.raise_for_status()
-                return True
+            try:
+                with httpx.Client(timeout=30.0) as client:
+                    response = client.post(
+                        f"{base_url}/chat/completions",
+                        headers=headers,
+                        json={
+                            "model": model,
+                            "messages": [{"role": "user", "content": "ping"}],
+                            "max_tokens": 5,
+                        },
+                    )
+                    response.raise_for_status()
+                    return True
+            except httpx.HTTPStatusError as exc:
+                detail = ""
+                try:
+                    body = exc.response.json()
+                    detail = str(
+                        body.get("error", {}).get("message")
+                        or body.get("message")
+                        or ""
+                    )
+                except ValueError:
+                    detail = exc.response.text[:200]
+                hint = ""
+                available = _available_models()
+                if available:
+                    hint = f"；可用模型：{', '.join(available[:6])}"
+                raise RuntimeError(f"HTTP {exc.response.status_code} {detail}{hint}") from None
 
         worker = Worker(_test, self)
         worker.completed.connect(

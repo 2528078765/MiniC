@@ -329,6 +329,66 @@ def test_model_panel_emb_key_echo(qapp, isolated_home: Path):
     panel.close()
 
 
+def test_model_panel_name_provider_separate_and_delete(qapp, isolated_home: Path, monkeypatch):
+    """模型面板：name/provider 独立字段回显；删除按钮移除并立即持久化剩余项。"""
+    import json
+
+    from PySide6.QtTest import QTest
+
+    from minic.gui.panels.model_panel import ModelPanel
+
+    (isolated_home / ".minic").mkdir(exist_ok=True)
+    (isolated_home / ".minic" / "minic.json").write_text(
+        json.dumps(
+            {
+                "model": {
+                    "models": [
+                        {"name": "我的DeepSeek", "provider": "deepseek", "base_url": "https://api.deepseek.com", "model": "deepseek-v4-flash", "enabled": True},
+                        {"name": "百炼", "provider": "openai", "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1", "model": "qwen3.7-flash", "enabled": True},
+                    ]
+                }
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    panel = ModelPanel(client=None, toast=lambda message: None, workspace=str(isolated_home))
+    panel.reload()
+    assert set(panel._providers) == {"我的DeepSeek", "百炼"}
+    panel._select_provider("百炼")
+    assert panel._name_input.text() == "百炼"
+    assert panel._provider_input.text() == "openai"
+    assert panel._url_input.text() == "https://dashscope.aliyuncs.com/compatible-mode/v1"
+
+    # 删除按钮：ConfirmDialog 直接确认 → 移除 + 提交剩余列表
+    payloads: list[dict] = []
+
+    class _FakeDialog:
+        confirmed = True
+
+        def exec(self) -> None:
+            return None
+
+    class _FakeClient:
+        base_url = "http://127.0.0.1:1"
+
+        def put_settings(self, payload: dict) -> bool:
+            payloads.append(payload)
+            return True
+
+    monkeypatch.setattr("minic.gui.widgets.dialogs.ConfirmDialog", lambda **kwargs: _FakeDialog())
+    panel.client = _FakeClient()
+    panel._delete_provider("百炼")
+    QTest.qWait(300)  # 等待提交 Worker 完成
+    assert set(panel._providers) == {"我的DeepSeek"}
+    assert len(payloads) == 1
+    submitted = payloads[0]["model"]["models"]
+    assert len(submitted) == 1
+    assert submitted[0]["name"] == "我的DeepSeek"
+    assert submitted[0]["provider"] == "deepseek"
+    panel.close()
+
+
 # ---------------------------------------------------------------- 复用控件
 
 def test_toggle_switch_toggles(qapp):
