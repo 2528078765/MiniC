@@ -221,11 +221,15 @@ class ModelPanel(PanelBase):
 
         actions = QHBoxLayout()
         actions.setSpacing(10)
-        self._save_btn = QPushButton("保存", form)
-        self._save_btn.clicked.connect(self.save)
         test_btn = QPushButton("测试连接", form)
         test_btn.clicked.connect(self._test_model_connection)
-        actions.addWidget(self._save_btn)
+        test_btn.setStyleSheet(
+            f"QPushButton {{ color: {COLOR_TEXT_SECONDARY}; background: transparent;"
+            f"border: 1px solid {COLOR_BORDER}; border-radius: 6px; padding: 6px 14px;"
+            f"font-size: 12px; }}"
+            f"QPushButton:hover {{ border-color: {COLOR_ACCENT}; color: #ffffff; }}"
+            f"QPushButton:pressed {{ background-color: #2a2d2e; }}"
+        )
         actions.addWidget(test_btn)
         actions.addStretch(1)
         form_layout.addLayout(actions)
@@ -284,6 +288,13 @@ class ModelPanel(PanelBase):
         emb_actions = QHBoxLayout()
         emb_test = QPushButton("测试连接", embody)
         emb_test.clicked.connect(self._test_embedding_connection)
+        emb_test.setStyleSheet(
+            f"QPushButton {{ color: {COLOR_TEXT_SECONDARY}; background: transparent;"
+            f"border: 1px solid {COLOR_BORDER}; border-radius: 6px; padding: 6px 14px;"
+            f"font-size: 12px; }}"
+            f"QPushButton:hover {{ border-color: {COLOR_ACCENT}; color: #ffffff; }}"
+            f"QPushButton:pressed {{ background-color: #2a2d2e; }}"
+        )
         emb_actions.addWidget(emb_test)
         emb_actions.addStretch(1)
         # Embedding 自己的「编辑/保存」按钮（独立于模型卡）
@@ -307,7 +318,6 @@ class ModelPanel(PanelBase):
         self.register_editable(
             add_btn,
             self._name_input, self._provider_input, self._url_input, self._model_input, self._key_input,
-            self._save_btn,
         )
         self._emb_edit_widgets = [self._emb_provider, self._emb_model, self._emb_url, self._emb_key]
         for widget in self._emb_edit_widgets:
@@ -444,7 +454,7 @@ class ModelPanel(PanelBase):
         """删除供应商：确认后移除并立即持久化剩余配置。"""
         from minic.gui.widgets.dialogs import ConfirmDialog
 
-        dialog = ConfirmDialog(parent=self, title="确认操作", text=f"是否删除供应商 {name}")
+        dialog = ConfirmDialog(f"是否删除供应商 {name}？", parent=self)
         dialog.exec()
         if not dialog.confirmed:
             return
@@ -641,14 +651,15 @@ class ModelPanel(PanelBase):
         worker.start()
 
     def _test_model_connection(self) -> None:
-        """测试模型供应商：用表单里的模型名真实发一次最小对话请求。
+        """测试模型供应商：校验 provider 名 + 用表单里的模型名真实发一次最小对话请求。
 
-        成功标准 = 真实请求返回成功（验证 Key + 模型名 + 端点三者都正确），
-        不是旧实现的 GET /models（只验证 Key 与端点，模型名错误也会"成功"）。
+        成功标准 = provider 被 langchain 认可（init_chat_model 构造通过，
+        openao 这类拼写错误直接失败）+ 真实请求返回成功（验证 Key/模型名/端点）。
         失败时尝试 GET /models 列出可用模型名辅助排查。
         """
         provider = self._collect_form()
         base_url = provider["base_url"].strip().rstrip("/")
+        provider_name = provider["provider"].strip()
         model = provider["model"]
         api_key = provider["api_key"]
         if not base_url:
@@ -676,6 +687,18 @@ class ModelPanel(PanelBase):
                 return []
 
         def _test() -> bool:
+            # 先校验 provider 名：langchain 构造会拒绝未知 provider（如 openao）
+            from minic.chat.models import _get_init_chat_model
+
+            try:
+                init_chat_model = _get_init_chat_model()
+                kwargs: dict[str, Any] = {"model_provider": provider_name, "base_url": base_url}
+                if api_key:
+                    kwargs["api_key"] = api_key
+                init_chat_model(model, **kwargs)
+            except Exception as exc:  # noqa: BLE001 - provider 拼写/参数错误原样透出
+                raise RuntimeError(f"provider 校验失败：{exc}") from None
+
             import httpx
 
             headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}

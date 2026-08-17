@@ -41,13 +41,13 @@ def settings_client(settings: AppSettings, tmp_path: Path, isolated_home: Path) 
 def test_put_settings_nested_dict_merge(
     settings_client: TestClient, tmp_path: Path, isolated_home: Path
 ) -> None:
-    """只改 model.temperature 时嵌套合并，其余字段保持不变，持久化可被 load_settings 读到。"""
+    """只改 model.temperature 时嵌套合并，其余字段保持不变（model 仅全局，用 global scope）。"""
     response = settings_client.put(
-        "/settings", headers=HEADERS, json={"model": {"temperature": 0.1}}
+        "/settings", headers=HEADERS, json={"scope": "global", "model": {"temperature": 0.1}}
     )
     assert response.status_code == 204
 
-    config_path = tmp_path / ".minic" / "minic.json"
+    config_path = isolated_home / ".minic" / "minic.json"
     assert config_path.exists()
     data = json.loads(config_path.read_text(encoding="utf-8"))
     assert data["model"]["temperature"] == 0.1
@@ -63,7 +63,7 @@ def test_put_settings_absent_fields_unchanged(
 ) -> None:
     """未出现在请求体中的字段保持不变。"""
     response = settings_client.put(
-        "/settings", headers=HEADERS, json={"model": {"temperature": 0.2}}
+        "/settings", headers=HEADERS, json={"scope": "global", "model": {"temperature": 0.2}}
     )
     assert response.status_code == 204
     loaded = load_settings(tmp_path)
@@ -88,11 +88,12 @@ def test_put_settings_array_replaced_wholesale(
 
 
 def test_put_settings_allows_model_api_key_and_get_strips(settings_client: TestClient, tmp_path: Path) -> None:
-    """模型列表允许写入 api_key（本地明文存储）；GET /settings 响应剔除。"""
+    """模型列表允许写入 api_key（本地明文存储，global scope）；GET /settings 响应剔除。"""
     response = settings_client.put(
         "/settings",
         headers=HEADERS,
         json={
+            "scope": "global",
             "model": {
                 "models": [
                     {
@@ -104,7 +105,7 @@ def test_put_settings_allows_model_api_key_and_get_strips(settings_client: TestC
                         "enabled": True,
                     }
                 ]
-            }
+            },
         },
     )
     assert response.status_code == 204

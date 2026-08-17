@@ -3,7 +3,7 @@
 ; 产物：dist\MiniC-Setup-0.0.1.exe（打包 dist\MiniC.exe，需先跑 PyInstaller）
 
 #define MyAppName "MiniC"
-#define MyAppVersion "0.0.2"
+#define MyAppVersion "0.0.3"
 #define MyAppPublisher "MiniC"
 #define MyAppExeName "MiniC.exe"
 
@@ -16,7 +16,7 @@ DefaultDirName={autopf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 OutputDir=..\dist
-OutputBaseFilename=MiniC-Setup-0.0.2
+OutputBaseFilename=MiniC-Setup-0.0.3
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern

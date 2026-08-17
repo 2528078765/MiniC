@@ -376,7 +376,7 @@ def test_model_panel_name_provider_separate_and_delete(qapp, isolated_home: Path
             payloads.append(payload)
             return True
 
-    monkeypatch.setattr("minic.gui.widgets.dialogs.ConfirmDialog", lambda **kwargs: _FakeDialog())
+    monkeypatch.setattr("minic.gui.widgets.dialogs.ConfirmDialog", lambda *args, **kwargs: _FakeDialog())
     panel.client = _FakeClient()
     panel._delete_provider("百炼")
     QTest.qWait(300)  # 等待提交 Worker 完成

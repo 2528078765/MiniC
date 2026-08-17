@@ -77,6 +77,30 @@ def ensure_default_config() -> None:
     _ensure_default_minic_json(Path.home() / ".minic" / "minic.json")
 
 
+def ensure_project_minic_json(path: Path) -> None:
+    """项目目录初始化：写**不含 model/embedding/rag 段**的默认配置（项目根标记）。
+
+    model/embedding/rag 仅全局可配置（项目里不能改这三段）；项目 minic.json
+    与全局配置合并时项目优先，若写入空 models 列表会把全局模型遮蔽成空
+    （0.0.2 默认全空踩坑），因此项目标记文件不写这三段。
+    """
+    try:
+        default_data = AppSettings().model_dump()
+    except Exception:  # noqa: BLE001 - 默认值构造失败则只建目录
+        _ensure_dir(path.parent)
+        return
+    for section in ("model", "embedding", "rag"):
+        default_data.pop(section, None)
+    _ensure_dir(path.parent)
+    if not path.exists():
+        try:
+            path.write_text(
+                json.dumps(default_data, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+        except OSError:
+            pass
+
+
 def local_skills(workspace: str | Path | None = None) -> list[dict[str, Any]]:
     """扫描全局/项目技能目录，返回与 ``GET /skills`` 同构的列表。
 

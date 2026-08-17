@@ -223,13 +223,18 @@ def resolve_project_root(workspace: str | Path, fallback: str | Path) -> Path:
 def load_settings(project_root: Path | None = None) -> AppSettings:
     """合并默认配置、全局配置与项目配置后返回设置对象。
 
-    - model/rag 等段项目优先合并；
-    - embedding 只读全局（向量空间必须一致），项目 minic.json 的 embedding 段忽略。
+    - approval/sandbox/memory/rate_limit/subagent 等段项目优先合并；
+    - model / embedding / rag 只读全局（项目里不能改这三段），
+      项目 minic.json 中即使手写这三段也会被忽略。
     """
     global_dir = Path.home() / ".minic"
     project_dir = project_root or Path.cwd()
     global_config = _read_json_file(global_dir / "minic.json")
     project_config = _read_json_file(project_dir / ".minic" / "minic.json")
+    for section in ("model", "embedding", "rag"):  # 项目不可改的三段：从项目配置中剔除
+        project_config.pop(section, None)
     merged = merge_dict(global_config, project_config)
-    merged["embedding"] = global_config.get("embedding", {})  # embedding 只读全局：不合并项目 embedding 段
+    for section in ("model", "embedding", "rag"):  # 最终以全局为准
+        if section in global_config:
+            merged[section] = global_config[section]
     return AppSettings.model_validate(merged)

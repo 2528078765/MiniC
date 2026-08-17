@@ -682,12 +682,13 @@ class MainWindow(QMainWindow):
             self._select_project(name)
             self._toast(f"项目已存在：{name}")
             return
-        # 初始化工作区 .minic（含默认 minic.json）：
+        # 初始化工作区 .minic（含项目标记 minic.json，不含 model/embedding 段，
+        # 避免空配置遮蔽全局模型）：
         # 核心只把「含 .minic/minic.json 的可写目录」识别为项目根，
         # 否则文件/命令会回退落到核心启动目录而不是本工作区。
-        from minic.gui.local_data import _ensure_default_minic_json
+        from minic.gui.local_data import ensure_project_minic_json
 
-        _ensure_default_minic_json(Path(directory) / ".minic" / "minic.json")
+        ensure_project_minic_json(Path(directory) / ".minic" / "minic.json")
         self._projects[name] = []
         self._project_dirs[name] = directory  # 记住工作区目录（工具/文件落在这里）
         self._project_empty.hide()
@@ -1453,12 +1454,15 @@ class MainWindow(QMainWindow):
         worker.start()
 
     def _default_work_dir(self) -> str:
-        """无工作区时的全局对话目录 ~/.minic/work（自动创建并初始化 .minic）。"""
+        """无工作区时的全局对话目录 ~/.minic/work（自动创建并初始化 .minic）。
+
+        项目标记 minic.json 不含 model/embedding 段（避免空配置遮蔽全局模型）。
+        """
         work = Path.home() / ".minic" / "work"
         work.mkdir(parents=True, exist_ok=True)
-        from minic.gui.local_data import _ensure_default_minic_json
+        from minic.gui.local_data import ensure_project_minic_json
 
-        _ensure_default_minic_json(work / ".minic" / "minic.json")
+        ensure_project_minic_json(work / ".minic" / "minic.json")
         return str(work)
 
     def _scroll_to_bottom(self) -> None:
