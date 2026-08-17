@@ -45,18 +45,12 @@ def main() -> int:
         if index + 1 < len(args):
             workspace = args[index + 1]
 
-    # 内嵌核心：后台线程自动拉起（双击即可用，无需命令行单独启动服务）
+    # 内嵌核心：双击即可用，无需命令行单独启动服务
     import threading
 
     from minic.gui.core_launcher import start_embedded_core, stop_embedded_core
 
     project_root = Path(workspace).resolve() if workspace else Path.cwd()
-    threading.Thread(
-        target=start_embedded_core,
-        args=(project_root,),
-        daemon=True,
-        name="minic-core-launcher",
-    ).start()
 
     app = QApplication(sys.argv)
     app.setApplicationName("MiniC")
@@ -75,6 +69,18 @@ def main() -> int:
 
     window = MainWindow(workspace=workspace)
     window.show()
+
+    # 核心在窗口构建完成后才启动后台线程：主线程的 GUI 导入链已全部完成，
+    # 核心线程再导入核心链路（graph/langchain/chromadb/mcp）不会与主线程
+    # 并发首次导入同一模块——否则会触发 Python 3.13+ 模块锁 _DeadlockError
+    # （打包后两线程并发 import minic.graph.* 必崩）。连接失败由主窗口自动重试兜底。
+    threading.Thread(
+        target=start_embedded_core,
+        args=(project_root,),
+        daemon=True,
+        name="minic-core-launcher",
+    ).start()
+
     return app.exec()
 
 

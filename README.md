@@ -36,6 +36,21 @@ MiniC 提供两种形态：
 - **崩溃恢复**：工具执行 `intent/result` 日志 + 幂等键，核心重启标记未完成 run 为 `interrupted`，不自动重放，用户消息收到后立即落盘。
 - **中间件**：PII 脱敏、限流、请求日志、长期记忆注入、模型网络错误重试、上下文过长自动摘要。
 
+## LangGraph 图预览
+
+MiniC 的总图由 LangGraph 编排：`route` 路由节点按意图分流到知识子图或动作子图，动作子图为教科书式 ReAct 结构（图上回边循环）。
+
+- 总图（route → knowledge / action）：[graph-super.png](graph-super.png)
+- 总图（xray 展开子图）：[graph-super-xray.png](graph-super-xray.png)
+- 动作子图（extract_memory → agent ⇄ tools → answer）：[graph-action.png](graph-action.png)
+- 知识子图（问题改写 → 混合检索 → 回答）：[graph-knowledge.png](graph-knowledge.png)
+
+![总图（xray 展开子图）](graph-super-xray.png)
+
+![动作子图（教科书式 ReAct）](graph-action.png)
+
+![知识子图](graph-knowledge.png)
+
 ## 环境要求
 
 - Python 3.13 或更高版本（开发环境为 Python 3.14）。
