@@ -71,10 +71,14 @@ class ModelSettings(BaseModel):
 
 
 class EmbeddingSettings(BaseModel):
-    """Embedding 配置。"""
+    """Embedding 配置。
 
-    provider: str = "dashscope"
-    base_url: str = "https://dashscope.aliyuncs.com"
+    provider 为 langchain init_embeddings 的 provider 名（openai / ollama /
+    azure_openai 等）；默认 openai 走百炼 OpenAI 兼容接口。
+    """
+
+    provider: str = "openai"
+    base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     model: str = "text-embedding-v3"
     dimension: int = 1024
     api_key: str | None = None

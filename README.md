@@ -17,7 +17,7 @@ MiniC 提供两种形态：
 2. 双击安装：自动创建开始菜单与桌面快捷方式，附卸载程序；默认装到用户目录（免管理员权限），也可选择安装给所有用户。
 3. 安装完成后双击 MiniC 图标启动：**核心服务内嵌在桌面端进程内自动拉起**，不需要命令行、不需要单独启动任何服务。
 4. 首次启动自动生成 `~/.minic/minic.json`（完整默认配置模板，含全部字段）——**无需手写配置**；进入「设置 → 模型设置」填写 Provider（供应商名称）、Base URL、模型、API Key 并保存即可对话（保存时核心若未启动完会自动等待；配置明文仅存本机，不入库、不上传）。
-5. 知识库功能：同样在「模型设置 → Embedding」配置 Provider（`dashscope` 原生 / `openai` OpenAI 兼容 / `ollama`，自由填写）、模型、Base URL 与 API Key。
+5. 知识库功能：同样在「模型设置 → Embedding」配置 Provider（langchain provider 名，如 `openai` / `ollama` / `azure_openai`，直接透传）、模型、Base URL（OpenAI 兼容端点）与 API Key。
 
 ### 方式二：绿色版（免安装）
 
@@ -344,8 +344,8 @@ allowed-tools:
     ]
   },
   "embedding": {
-    "provider": "dashscope",
-    "base_url": "https://dashscope.aliyuncs.com",
+    "provider": "openai",
+    "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
     "model": "text-embedding-v3",
     "dimension": 1024
   },

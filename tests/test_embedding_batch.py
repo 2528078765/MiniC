@@ -1,4 +1,4 @@
-"""DashScope / OpenAI 兼容 embedding 测试：批量限制、路径归一化与工厂。"""
+"""Embedding 测试：langchain init_embeddings 通用包装（透传/分批/降级/工厂）。"""
 
 from __future__ import annotations
 
@@ -6,84 +6,10 @@ from unittest import mock
 
 from minic.core.config import AppSettings
 from minic.rag.embeddings import (
-    DashScopeEmbeddingProvider,
     DisabledEmbeddingProvider,
     LangChainEmbeddingProvider,
     create_embedding_provider,
 )
-
-
-class _FakeResponse:
-    """按请求文本数返回等量向量的假响应。"""
-
-    def __init__(self, count: int) -> None:
-        self._count = count
-
-    def raise_for_status(self) -> None:
-        return None
-
-    def json(self) -> dict:
-        return {
-            "output": {
-                "embeddings": [{"embedding": [0.1] * 8} for _ in range(self._count)]
-            }
-        }
-
-
-class _FakeClient:
-    """记录每次请求文本数的假 httpx.Client。"""
-
-    def __init__(self, *args, **kwargs) -> None:
-        self.batch_sizes: list[int] = []
-
-    def __enter__(self) -> "_FakeClient":
-        return self
-
-    def __exit__(self, *args) -> None:
-        return None
-
-    def post(self, endpoint: str, headers=None, json=None) -> _FakeResponse:
-        del endpoint, headers
-        texts = json["input"]["texts"]
-        self.batch_sizes.append(len(texts))
-        return _FakeResponse(len(texts))
-
-
-def test_dashscope_batches_large_inputs_into_groups_of_ten() -> None:
-    """25 条文本应拆成 10/10/5 三次请求，向量按顺序拼回。"""
-    provider = DashScopeEmbeddingProvider(
-        api_key="sk", model="text-embedding-v3", base_url="https://example.com"
-    )
-    client = _FakeClient()
-    with mock.patch("minic.rag.embeddings.httpx.Client", return_value=client):
-        vectors = provider.embed_texts([f"文本{i}" for i in range(25)])
-
-    assert client.batch_sizes == [10, 10, 5]
-    assert len(vectors) == 25
-    assert all(len(vector) == 8 for vector in vectors)
-
-
-def test_dashscope_single_batch_shortcuts() -> None:
-    """不超过 10 条只发一次请求。"""
-    provider = DashScopeEmbeddingProvider(
-        api_key="sk", model="text-embedding-v3", base_url="https://example.com"
-    )
-    client = _FakeClient()
-    with mock.patch("minic.rag.embeddings.httpx.Client", return_value=client):
-        vectors = provider.embed_texts(["a", "b", "c"])
-
-    assert client.batch_sizes == [3]
-    assert len(vectors) == 3
-
-
-def test_dashscope_base_url_strips_api_v1_suffix() -> None:
-    """base_url 误填 /api/v1 时归一化到服务根，不产生重复路径。"""
-    provider = DashScopeEmbeddingProvider(
-        api_key="sk", model="text-embedding-v3", base_url="https://example.com/api/v1"
-    )
-    assert provider.endpoint == (
-        "https://example.com/api/v1/services/embeddings/text-embedding/text-embedding"
-    )
 
 
 class _FakeEmbeddings:
@@ -98,18 +24,18 @@ class _FakeEmbeddings:
 
 
 def test_langchain_provider_delegates_embed_documents() -> None:
-    """langchain 包装：embed_texts 委托 init_embeddings 产物。"""
+    """包装：embed_texts 委托 init_embeddings 产物，参数全部透传。"""
     fake = _FakeEmbeddings()
     with mock.patch("langchain.embeddings.init_embeddings", return_value=fake) as init:
         provider = LangChainEmbeddingProvider(
-            model="qwen3-embedding",
+            model="text-embedding-v3",
             provider="openai",
             base_url="https://example.com/v1",
             api_key="sk",
         )
         vectors = provider.embed_texts(["a", "b"])
 
-    assert init.call_args.args[0] == "qwen3-embedding"
+    assert init.call_args.args[0] == "text-embedding-v3"
     assert init.call_args.kwargs["provider"] == "openai"
     assert init.call_args.kwargs["base_url"] == "https://example.com/v1"
     assert init.call_args.kwargs["api_key"] == "sk"
@@ -117,27 +43,41 @@ def test_langchain_provider_delegates_embed_documents() -> None:
     assert vectors == [[0.1, 0.2], [0.1, 0.2]]
 
 
-def test_langchain_provider_strips_provider_prefix() -> None:
-    """支持文档里的 provider:model 前缀写法（openai:Pro/BAAI/bge-m3）。"""
+def test_langchain_provider_batches_generic_limit() -> None:
+    """超过 25 条按 25 一批拆分（各家接口单批上限不同，统一通用分批）。"""
+    fake = _FakeEmbeddings()
+    with mock.patch("langchain.embeddings.init_embeddings", return_value=fake):
+        provider = LangChainEmbeddingProvider(
+            model="m", provider="openai", base_url="https://example.com/v1", api_key="sk"
+        )
+        texts = [f"t{i}" for i in range(60)]
+        vectors = provider.embed_texts(texts)
+
+    assert [len(batch) for batch in fake.calls] == [25, 25, 10]
+    assert len(vectors) == 60
+
+
+def test_langchain_provider_omits_empty_base_url_and_key() -> None:
+    """base_url/api_key 为空时不透传（用 provider 默认值或环境变量）。"""
     fake = _FakeEmbeddings()
     with mock.patch("langchain.embeddings.init_embeddings", return_value=fake) as init:
-        LangChainEmbeddingProvider(
-            model="openai:Pro/BAAI/bge-m3",
-            provider="openai",
-            base_url="https://example.com/v1",
-            api_key="sk",
-        )
-    assert init.call_args.args[0] == "Pro/BAAI/bge-m3"  # 前缀已剥离
+        LangChainEmbeddingProvider(model="m", provider="ollama", base_url="", api_key=None)
+
+    assert "base_url" not in init.call_args.kwargs
+    assert "api_key" not in init.call_args.kwargs
 
 
 def test_factory_supports_openai_provider() -> None:
-    """工厂支持 openai 兼容 provider；缺 api_key 时降级为禁用态。"""
+    """工厂：openai provider 返回 langchain 包装。"""
     settings = AppSettings(
         embedding={"provider": "openai", "base_url": "https://example.com/v1", "model": "m", "api_key": "sk"}
     )
     provider = create_embedding_provider(settings)
     assert isinstance(provider, LangChainEmbeddingProvider)
 
+
+def test_factory_missing_api_key_returns_disabled() -> None:
+    """缺 api_key：openai provider 构造抛 OpenAIError → 降级禁用态不崩核心。"""
     settings = AppSettings(
         embedding={"provider": "openai", "base_url": "https://example.com/v1", "model": "m", "api_key": None}
     )

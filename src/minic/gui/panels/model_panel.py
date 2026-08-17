@@ -245,13 +245,13 @@ class ModelPanel(PanelBase):
         provider_column = QVBoxLayout()
         provider_column.setSpacing(3)
         self._emb_provider = QLineEdit(embody)
-        self._emb_provider.setPlaceholderText("如：dashscope（阿里云百炼）/ openai / ollama")
+        self._emb_provider.setPlaceholderText("langchain provider 名，如：openai / ollama / azure_openai")
         self._emb_provider.setStyleSheet(
             f"background-color: {COLOR_BG_MAIN}; color: #ffffff;"
             f"border: 1px solid {COLOR_BORDER}; border-radius: 6px; padding: 6px 10px;"
         )
         provider_column.addWidget(self._emb_provider)
-        provider_hint = QLabel("兼容 OpenAI 的供应商名，可自行填写", embody)
+        provider_hint = QLabel("直接透传 langchain init_embeddings，无供应商特判", embody)
         provider_hint.setStyleSheet(
             f"color: {COLOR_TEXT_MUTED}; font-size: 11px; background: transparent; border: none;"
         )
@@ -263,8 +263,8 @@ class ModelPanel(PanelBase):
             embody_layout, "模型", "如：text-embedding-v3", embody
         )
         self._emb_url = self._make_form_row(
-            embody_layout, "Base URL", "https://dashscope.aliyuncs.com", embody,
-            hint="原生接口填 https://dashscope.aliyuncs.com；OpenAI 兼容填 https://dashscope.aliyuncs.com/compatible-mode/v1",
+            embody_layout, "Base URL", "https://dashscope.aliyuncs.com/compatible-mode/v1", embody,
+            hint="OpenAI 兼容端点（如百炼 compatible-mode/v1）；ollama 填 http://127.0.0.1:11434/v1",
         )
         self._emb_key = self._make_form_row(
             embody_layout, "API Key", "sk-…（仅本地存储，不入库）", embody, password=True
@@ -633,10 +633,8 @@ class ModelPanel(PanelBase):
     def _test_embedding_connection(self) -> None:
         """测试 Embedding 连接：按 provider 真实发一次最小 embedding 请求。
 
-        openai 兼容走 POST {base_url}/embeddings；dashscope 原生走 POST
-        {base_url}/api/v1/services/embeddings/text-embedding/text-embedding；
-        ollama 走 POST {base_url}/api/embed。旧实现探测 GET /embeddings 对
-        上述接口均不存在（只接受 POST），必然失败，已废弃。
+        ollama 走 POST {base_url}/api/embed；其余 provider 按 OpenAI 兼容
+        探测 POST {base_url}/embeddings（与核心 init_embeddings 的使用方式一致）。
         失败时尝试 GET {base_url}/models 列出可用模型名辅助排查。
         """
         provider = self._emb_provider.text().strip().lower()
@@ -671,17 +669,11 @@ class ModelPanel(PanelBase):
             import httpx
 
             headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
-            if provider == "dashscope":  # 原生接口（路径自带的 /api/v1 归一化掉）
-                base = base_url
-                if base.endswith("/api/v1"):
-                    base = base[: -len("/api/v1")]
-                url = f"{base}/api/v1/services/embeddings/text-embedding/text-embedding"
-                payload = {"model": model, "input": {"texts": ["测试连接"]}, "parameters": {"text_type": "query"}}
-            elif provider == "ollama":  # Ollama 原生接口
+            if provider == "ollama":  # Ollama 原生接口
                 url = f"{base_url}/api/embed"
                 payload = {"model": model, "input": ["测试连接"]}
                 headers = {}
-            else:  # openai 兼容接口
+            else:  # openai 兼容接口（百炼 compatible-mode 等）
                 url = f"{base_url}/embeddings"
                 payload = {"model": model, "input": ["测试连接"]}
             try:

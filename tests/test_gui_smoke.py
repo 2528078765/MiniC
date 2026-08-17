@@ -310,8 +310,8 @@ def test_model_panel_emb_key_echo(qapp, isolated_home: Path):
                     ]
                 },
                 "embedding": {
-                    "provider": "dashscope",
-                    "base_url": "https://dashscope.aliyuncs.com",
+                    "provider": "openai",
+                    "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
                     "model": "text-embedding-v3",
                     "api_key": "sk-emb-1",
                 },
@@ -322,9 +322,9 @@ def test_model_panel_emb_key_echo(qapp, isolated_home: Path):
     )
     panel = ModelPanel(client=None, toast=lambda message: None, workspace=str(isolated_home))
     panel.reload()
-    assert panel._emb_provider.text() == "dashscope"
+    assert panel._emb_provider.text() == "openai"
     assert panel._emb_model.text() == "text-embedding-v3"
-    assert panel._emb_url.text() == "https://dashscope.aliyuncs.com"
+    assert panel._emb_url.text() == "https://dashscope.aliyuncs.com/compatible-mode/v1"
     assert panel._emb_key.text() == "sk-emb-1"
     panel.close()
 
