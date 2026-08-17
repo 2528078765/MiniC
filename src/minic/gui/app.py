@@ -44,6 +44,15 @@ def main() -> int:
         index = args.index("--workspace")
         if index + 1 < len(args):
             workspace = args[index + 1]
+    if workspace is None and getattr(sys, "frozen", False):
+        # 安装版/绿色版：cwd 可能是只读的安装目录或下载目录，
+        # 无工作区时统一落 ~/.minic/work（与 CLI 无工作区行为一致）
+        workspace = str(Path.home() / ".minic" / "work")
+
+    # 首次启动自动生成 ~/.minic/minic.json（完整默认配置模板，用户无需手写）
+    from minic.gui.local_data import ensure_default_config
+
+    ensure_default_config()
 
     # 内嵌核心：双击即可用，无需命令行单独启动服务
     import threading

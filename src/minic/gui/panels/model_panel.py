@@ -541,6 +541,20 @@ class ModelPanel(PanelBase):
         self._emb_url.setText(snapshot.get("base_url", ""))
         self._emb_key.setText(snapshot.get("api_key", ""))  # 回滚到已保存的 api_key（本地明文）
 
+    def _put_settings_waiting(self, payload: dict[str, Any]) -> bool:
+        """核心未就绪时轮询等待（最多 30 秒），就绪后再提交设置。
+
+        双击启动后核心在后台拉起（约 14 秒），若用户立刻保存会连接失败；
+        等待就绪后提交，仍失败则抛 RuntimeError 让通知条显示原因。
+        """
+        client = self.client
+        deadline = time.monotonic() + 30.0
+        while client.base_url is None and time.monotonic() < deadline:
+            time.sleep(1.0)
+        if client.base_url is None:
+            raise RuntimeError("核心未就绪，请稍后重试")
+        return client.put_settings(payload)
+
     def _submit_model(self, provider: dict[str, Any]) -> None:
         """提交模型配置到核心（全局 scope，models 列表含 enabled 与 api_key 明文）。"""
         if self.client is None:
@@ -559,7 +573,7 @@ class ModelPanel(PanelBase):
                 }
             )
         payload = {"scope": "global", "model": {"models": models}}
-        worker = Worker(lambda: self.client.put_settings(payload), self)
+        worker = Worker(lambda: self._put_settings_waiting(payload), self)
         worker.completed.connect(
             lambda ok: self.notify("已保存模型配置（下拉框可选）", "success") if ok else self.notify("保存失败", "failed")
         )
@@ -579,7 +593,7 @@ class ModelPanel(PanelBase):
                 "api_key": self._emb_key.text() or None,
             },
         }
-        worker = Worker(lambda: self.client.put_settings(payload), self)
+        worker = Worker(lambda: self._put_settings_waiting(payload), self)
         worker.completed.connect(
             lambda ok: self.notify("已保存 Embedding 配置", "success") if ok else self.notify("保存失败", "failed")
         )

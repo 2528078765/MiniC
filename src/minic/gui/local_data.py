@@ -68,6 +68,15 @@ def _ensure_default_minic_json(path: Path) -> None:
         pass  # 配置损坏时不覆盖，交由核心报错处理
 
 
+def ensure_default_config() -> None:
+    """首次启动自动创建 ``~/.minic/minic.json``（完整默认配置模板）。
+
+    已存在则补全缺失配置段/字段（不覆盖已有值）——用户无需手写配置文件，
+    在桌面端设置里保存即可；也可以直接编辑该文件（含注释字段齐全）。
+    """
+    _ensure_default_minic_json(Path.home() / ".minic" / "minic.json")
+
+
 def local_skills(workspace: str | Path | None = None) -> list[dict[str, Any]]:
     """扫描全局/项目技能目录，返回与 ``GET /skills`` 同构的列表。
 
