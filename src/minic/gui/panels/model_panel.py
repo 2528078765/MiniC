@@ -245,7 +245,7 @@ class ModelPanel(PanelBase):
         provider_column = QVBoxLayout()
         provider_column.setSpacing(3)
         self._emb_provider = QLineEdit(embody)
-        self._emb_provider.setPlaceholderText("如：dashscope（阿里云百炼）/ ollama")
+        self._emb_provider.setPlaceholderText("如：dashscope（阿里云百炼）/ openai / ollama")
         self._emb_provider.setStyleSheet(
             f"background-color: {COLOR_BG_MAIN}; color: #ffffff;"
             f"border: 1px solid {COLOR_BORDER}; border-radius: 6px; padding: 6px 10px;"
@@ -264,7 +264,7 @@ class ModelPanel(PanelBase):
         )
         self._emb_url = self._make_form_row(
             embody_layout, "Base URL", "https://dashscope.aliyuncs.com", embody,
-            hint="使用兼容 OpenAI 的 baseurl",
+            hint="原生接口填 https://dashscope.aliyuncs.com；OpenAI 兼容填 https://dashscope.aliyuncs.com/compatible-mode/v1",
         )
         self._emb_key = self._make_form_row(
             embody_layout, "API Key", "sk-…（仅本地存储，不入库）", embody, password=True
@@ -631,22 +631,80 @@ class ModelPanel(PanelBase):
         worker.start()
 
     def _test_embedding_connection(self) -> None:
-        """测试 Embedding 连接（顶部通知条反馈）。"""
+        """测试 Embedding 连接：按 provider 真实发一次最小 embedding 请求。
+
+        openai 兼容走 POST {base_url}/embeddings；dashscope 原生走 POST
+        {base_url}/api/v1/services/embeddings/text-embedding/text-embedding；
+        ollama 走 POST {base_url}/api/embed。旧实现探测 GET /embeddings 对
+        上述接口均不存在（只接受 POST），必然失败，已废弃。
+        失败时尝试 GET {base_url}/models 列出可用模型名辅助排查。
+        """
+        provider = self._emb_provider.text().strip().lower()
         base_url = self._emb_url.text().strip().rstrip("/")
+        model = self._emb_model.text().strip()
+        api_key = self._emb_key.text()
         if not base_url:
             self.notify("测试连接失败：请先填写 Base URL", "failed")
             return
-        api_key = self._emb_key.text()
+        if not model:
+            self.notify("测试连接失败：请先填写模型名", "failed")
+            return
         started = time.monotonic()
+
+        def _available_models() -> list[str]:
+            """GET {base_url}/models 列出可用模型（仅 openai 兼容接口有此端点）。"""
+            import httpx
+
+            try:
+                headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+                with httpx.Client(timeout=10.0) as client:
+                    response = client.get(f"{base_url}/models", headers=headers)
+                    if response.status_code != 200:
+                        return []
+                    data = response.json()
+                    models = [str(item.get("id", "")) for item in data.get("data", [])]
+                    return [name for name in models if name]
+            except httpx.HTTPError:
+                return []
 
         def _test() -> bool:
             import httpx
 
             headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
-            with httpx.Client(timeout=10.0) as client:
-                response = client.get(f"{base_url}/embeddings", headers=headers)
-                response.raise_for_status()
-                return True
+            if provider == "dashscope":  # 原生接口（路径自带的 /api/v1 归一化掉）
+                base = base_url
+                if base.endswith("/api/v1"):
+                    base = base[: -len("/api/v1")]
+                url = f"{base}/api/v1/services/embeddings/text-embedding/text-embedding"
+                payload = {"model": model, "input": {"texts": ["测试连接"]}, "parameters": {"text_type": "query"}}
+            elif provider == "ollama":  # Ollama 原生接口
+                url = f"{base_url}/api/embed"
+                payload = {"model": model, "input": ["测试连接"]}
+                headers = {}
+            else:  # openai 兼容接口
+                url = f"{base_url}/embeddings"
+                payload = {"model": model, "input": ["测试连接"]}
+            try:
+                with httpx.Client(timeout=15.0) as client:
+                    response = client.post(url, headers=headers, json=payload)
+                    response.raise_for_status()
+                    return True
+            except httpx.HTTPStatusError as exc:
+                detail = ""
+                try:
+                    body = exc.response.json()
+                    detail = str(
+                        body.get("error", {}).get("message")
+                        or body.get("message")
+                        or ""
+                    )
+                except ValueError:
+                    detail = exc.response.text[:200]
+                hint = ""
+                available = _available_models()
+                if available:
+                    hint = f"；可用模型：{', '.join(available[:6])}"
+                raise RuntimeError(f"HTTP {exc.response.status_code} {detail}{hint}") from None
 
         worker = Worker(_test, self)
         worker.completed.connect(

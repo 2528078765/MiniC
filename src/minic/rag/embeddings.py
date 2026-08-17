@@ -68,14 +68,45 @@ class OllamaEmbeddingProvider:
         raise ValueError("Ollama 返回的 embedding 格式不正确")
 
 
+class LangChainEmbeddingProvider:
+    """langchain ``init_embeddings`` 统一入口包装。
+
+    与 chat 模型侧 ``init_chat_model`` 保持一致：openai 兼容等 langchain
+    内建 provider（openai/azure/bedrock/cohere 等）都用它创建，支持
+    ``provider:model`` 前缀写法（如 ``openai:Pro/BAAI/bge-m3``）。
+    dashscope 原生与 ollama 因批量上限/依赖原因保留手写实现。
+    """
+
+    def __init__(self, model: str, provider: str, base_url: str, api_key: str | None) -> None:
+        from langchain.embeddings import init_embeddings
+
+        model_name = model
+        if ":" in model_name and model_name.split(":", 1)[0] == provider:
+            model_name = model_name.split(":", 1)[1]  # 兼容 "provider:model" 前缀写法
+        kwargs: dict[str, Any] = {}
+        if base_url:
+            kwargs["base_url"] = base_url
+        if api_key:
+            kwargs["api_key"] = api_key
+        self._embeddings = init_embeddings(model_name, provider=provider, **kwargs)
+
+    def embed_texts(self, texts: list[str], text_type: str = "document") -> list[list[float]]:
+        """批量向量化（委托 langchain ``embed_documents``）。"""
+        del text_type
+        return self._embeddings.embed_documents(texts)
+
+
 class DashScopeEmbeddingProvider:
     """通过阿里云百炼的 text-embedding-v3 生成向量。"""
 
     def __init__(self, api_key: str, model: str, base_url: str) -> None:
         self.api_key = api_key
         self.model = model
+        base = base_url.rstrip("/")
+        if base.endswith("/api/v1"):  # 用户误填接口路径时归一化到服务根地址
+            base = base[: -len("/api/v1")]
         self.endpoint = (
-            f"{base_url.rstrip('/')}/api/v1/services/embeddings/text-embedding/text-embedding"
+            f"{base}/api/v1/services/embeddings/text-embedding/text-embedding"
         )
 
     def embed_texts(self, texts: list[str], text_type: str = "document") -> list[list[float]]:
@@ -149,4 +180,19 @@ def create_embedding_provider(settings: AppSettings) -> EmbeddingProvider:
             model=settings.embedding.model,
             base_url=settings.embedding.base_url,
         )
-    raise ValueError(f"不支持的 embedding provider: {provider}")
+    # 其余 provider（openai、azure_openai、bedrock 等）走 langchain init_embeddings
+    # 统一入口（与 chat 模型侧 init_chat_model 对齐）；初始化失败降级为禁用态，
+    # 不阻断核心启动，调用时报明确原因。
+    if not settings.embedding.api_key:
+        return DisabledEmbeddingProvider(
+            f"{provider} embedding 需要配置 api_key（设置 → 模型设置 → Embedding）"
+        )
+    try:
+        return LangChainEmbeddingProvider(
+            model=settings.embedding.model,
+            provider=provider,
+            base_url=settings.embedding.base_url,
+            api_key=settings.embedding.api_key,
+        )
+    except Exception as exc:  # noqa: BLE001 - 未知 provider/缺依赖时降级禁用态
+        return DisabledEmbeddingProvider(f"初始化 {provider} embedding 失败：{exc}")
