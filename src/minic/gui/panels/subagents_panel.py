@@ -157,7 +157,7 @@ class SubagentsPanel(PanelBase):
             f"background: transparent; color: {COLOR_TEXT_MUTED}; border: none; font-size: 14px;"
             f"border-radius: 6px;"
         )
-        refresh_btn.clicked.connect(self.reload)
+        refresh_btn.clicked.connect(self.refresh)
         header.addWidget(refresh_btn)
         root.addLayout(header)
 
@@ -183,11 +183,23 @@ class SubagentsPanel(PanelBase):
         root.addLayout(self._content)
         root.addStretch(1)
 
+    def refresh(self) -> None:
+        """刷新按钮：重新加载并弹出「刷新成功」通知条（3 秒自动消失）。"""
+        self._refresh_feedback = True
+        self.reload()
+
+    def _finish_refresh(self, count: int) -> None:
+        """手动刷新完成后的通知条反馈。"""
+        if getattr(self, "_refresh_feedback", False):
+            self._refresh_feedback = False
+            self.notify(f"刷新成功（{count} 个子智能体）", "success")
+
     def reload(self) -> None:
         """拉取最近子任务。"""
         if self.client is None or not getattr(self.client, "base_url", None):
             self._agents = []
             self._render()
+            self._finish_refresh(len(self._agents))
             return
         worker = Worker(lambda: (self.client.get_agents() or {}).get("agents", []), self)
         worker.completed.connect(self._on_agents_loaded)
@@ -198,6 +210,7 @@ class SubagentsPanel(PanelBase):
         """渲染最近子任务。"""
         self._agents = list(agents) if isinstance(agents, list) else []
         self._render()
+        self._finish_refresh(len(self._agents))
 
     def _render(self) -> None:
         """渲染内置卡片与最近子任务。"""

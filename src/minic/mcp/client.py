@@ -11,6 +11,7 @@ import asyncio
 import contextlib
 import fnmatch
 import json
+import logging
 from pathlib import Path
 from typing import Any, Callable
 
@@ -149,7 +150,13 @@ class McpManager:
     ) -> None:
         """初始化管理器并读取配置。"""
         self.settings_path = settings_path  # 配置文件路径
-        self._config = load_mcp_settings(settings_path)["mcpServers"]  # 服务配置
+        try:
+            self._config = load_mcp_settings(settings_path)["mcpServers"]  # 服务配置
+        except ValueError as exc:
+            # 启动容忍非法配置（如 URL 混入裸 Tab 致 JSON 非法）：按空配置启动，
+            # 查询 /mcp 时 reload_config 仍抛明确错误提示用户修复
+            logging.getLogger("minic.mcp").warning("MCP 配置解析失败，按空配置启动: %s", exc)
+            self._config = {}
         self._max_attempts = max_attempts  # 最大连接尝试次数
         self._backoff_delays = backoff_delays  # 重试延迟序列
         self._clients: dict[str, Client] = {}  # 已连接服务 -> 活跃客户端

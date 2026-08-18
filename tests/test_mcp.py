@@ -513,3 +513,21 @@ def test_tools_run_executes_mcp_tool(
         assert "tool_result" in events
         assert "approval_requested" not in events
         assert any("hello-mcp" in output for output in outputs)
+
+
+def test_get_mcp_invalid_config_returns_400(settings: AppSettings, tmp_path: Path) -> None:
+    """MCP 配置文件非法 JSON（如 URL 混入裸 Tab）：GET /mcp 返回 400 带原因，不 500。"""
+    bad = tmp_path / "bad_mcp.json"
+    bad.write_text('{"mcpServers": {"x": {"url": "https://a.com?key=\tea"}}}', encoding="utf-8")
+    app = create_app(
+        settings=settings,
+        token="test-token",
+        project_root=tmp_path,
+        rag_data_dir=tmp_path / "rag-data",
+        short_memory_dir=tmp_path / "memory" / "short_memory",
+        mcp_settings_path=bad,
+    )
+    client = TestClient(app)
+    response = client.get("/mcp", headers=AUTH_HEADERS)
+    assert response.status_code == 400
+    assert "不是合法 JSON" in response.json()["error"]["message"]

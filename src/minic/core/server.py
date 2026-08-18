@@ -523,7 +523,10 @@ def create_app(
     @app.get("/mcp", dependencies=[Depends(_require_auth)])
     def mcp_status() -> dict[str, Any]:
         """返回 MCP 服务状态列表（查询前重载配置：启动后新增服务无需重启核心）。"""
-        app.state.mcp_manager.reload_config()
+        try:
+            app.state.mcp_manager.reload_config()
+        except ValueError as exc:
+            raise _error(400, "VALIDATION_ERROR", str(exc)) from exc  # 配置解析错误带路径原因
         return {"servers": app.state.mcp_manager.status()}
 
     @app.post("/mcp/{name}/connect", dependencies=[Depends(_require_auth)])

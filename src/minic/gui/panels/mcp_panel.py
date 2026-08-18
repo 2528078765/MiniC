@@ -166,7 +166,7 @@ class McpPanel(PanelBase):
             f"background: transparent; color: {COLOR_TEXT_MUTED}; border: none; font-size: 14px;"
             f"border-radius: 6px;"
         )
-        refresh_btn.clicked.connect(self.reload)
+        refresh_btn.clicked.connect(self.refresh)
         header.addWidget(refresh_btn)
         root.addLayout(header)
 
@@ -193,13 +193,42 @@ class McpPanel(PanelBase):
         root.addLayout(self._group_layout)
         root.addStretch(1)
 
+    def refresh(self) -> None:
+        """刷新按钮：重新加载并弹出「刷新成功」通知条（3 秒自动消失）。"""
+        self._refresh_feedback = True
+        self.reload()
+
+    def _finish_refresh(self, count: int) -> None:
+        """手动刷新完成后的通知条反馈。"""
+        if getattr(self, "_refresh_feedback", False):
+            self._refresh_feedback = False
+            self.notify(f"刷新成功（{count} 个 MCP 服务）", "success")
+
     def reload(self) -> None:
-        """加载 MCP：核心可用走 /mcp，否则本地读 ~/.minic/mcp/minic_mcp_settings.json。"""
+        """加载 MCP：核心可用走 /mcp，否则本地读 ~/.minic/mcp/minic_mcp_settings.json。
+
+        配置文件 JSON 非法时明确报错（不再静默显示空列表）。
+        """
         if self.client is None or not getattr(self.client, "base_url", None):
-            self._servers = local_mcp()
+            try:
+                self._servers = local_mcp()
+            except ValueError as exc:
+                self.notify(f"MCP 配置解析失败：{exc}", "failed")
+                self._servers = []
             self._render()
+            self._finish_refresh(len(self._servers))
             return
-        worker = Worker(lambda: (self.client.get_mcp() or {}).get("servers", []), self)
+
+        def _load() -> list[dict[str, Any]]:
+            data = self.client.get_mcp()
+            if data is None:  # 读取失败（含 400 配置解析错误）：本地解析拿具体原因
+                try:
+                    return local_mcp()
+                except ValueError as exc:
+                    raise RuntimeError(str(exc)) from None
+            return list(data.get("servers", []))
+
+        worker = Worker(_load, self)
         worker.completed.connect(self._on_servers_loaded)
         worker.failed.connect(lambda err: self.notify(f"读取 MCP 失败：{err}", "failed"))
         worker.start()
@@ -208,6 +237,7 @@ class McpPanel(PanelBase):
         """渲染服务器列表。"""
         self._servers = list(servers) if isinstance(servers, list) else []
         self._render()
+        self._finish_refresh(len(self._servers))
 
     def _render(self) -> None:
         """按过滤条件渲染。"""

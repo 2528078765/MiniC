@@ -10,7 +10,7 @@ def test_health_returns_ok(client: TestClient) -> None:
     data = response.json()
     assert data["status"] == "ok"
     assert data["pid"] > 0
-    assert data["version"] == "0.1"
+    assert data["version"] == "0.2"
     assert data["started_at"]
 
 

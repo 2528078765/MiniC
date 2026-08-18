@@ -4,13 +4,13 @@ MiniC 是一个本地的 AI 知识助手（DeepAgent）：支持向量化存储�
 
 MiniC 提供桌面端：从 Releases 下载安装包，安装即用。
 
-下载方式：[最新版本下载](https://github.com/2528078765/MiniC/releases/latest)（`MiniC-Setup-0.1.exe`，Windows 10/11 x64）
+下载方式：[最新版本下载](https://github.com/2528078765/MiniC/releases/latest)（`MiniC-Setup-0.2.exe`，Windows 10/11 x64）
 
 > English README: [README.en.md](README.en.md)
 
 ## 安装方式
 
-1. 下载 `MiniC-Setup-0.1.exe`，双击安装：自动创建开始菜单与桌面快捷方式，附卸载程序；默认免管理员安装到用户目录，也可选择安装给所有用户。
+1. 下载 `MiniC-Setup-0.2.exe`，双击安装：自动创建开始菜单与桌面快捷方式，附卸载程序；默认免管理员安装到用户目录，也可选择安装给所有用户。
 2. 安装完成后双击 MiniC 图标启动：**核心服务内嵌在桌面端进程内自动拉起**，不需要命令行、不需要单独启动任何服务。
 3. 首次启动自动生成 `~/.minic/minic.json`（完整默认配置模板，含全部字段）——**无需手写配置**；在设置里配置 API Key 后即可使用（见「配置 API Key」）。
 4. 数据目录：`~/.minic/`（配置、RAG 索引、记忆、日志），安装目录只放程序本体。

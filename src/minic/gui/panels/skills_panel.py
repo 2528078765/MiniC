@@ -183,6 +183,7 @@ class SkillsPanel(PanelBase):
         if self.client is None or not getattr(self.client, "base_url", None):
             self._skills = local_skills(self.workspace)
             self._render()
+            self._finish_refresh(len(self._skills))
             return
         worker = Worker(lambda: self.client.get_skills(), self)
         worker.completed.connect(self._on_skills_loaded)
@@ -193,6 +194,7 @@ class SkillsPanel(PanelBase):
         """渲染技能列表。"""
         self._skills = list(skills) if isinstance(skills, list) else []
         self._render()
+        self._finish_refresh(len(self._skills))
 
     def _render(self) -> None:
         """按过滤条件渲染技能分组。"""
@@ -293,5 +295,12 @@ class SkillsPanel(PanelBase):
         self.reload()
 
     def _on_refresh(self) -> None:
-        """刷新列表。"""
+        """刷新列表并弹出「刷新成功」通知条（3 秒自动消失）。"""
+        self._refresh_feedback = True
         self.reload()
+
+    def _finish_refresh(self, count: int) -> None:
+        """手动刷新完成后的通知条反馈。"""
+        if getattr(self, "_refresh_feedback", False):
+            self._refresh_feedback = False
+            self.notify(f"刷新成功（{count} 个技能）", "success")
