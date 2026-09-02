@@ -1,0 +1,8 @@
+{
+  "MiniC": "一个本地优先的 AI 知识助手（DeepAgent），支持知识库问答、本地工具、会话与长期记忆、MCP/SKILL/子智能体，所有数据都留在本机，核心服务只监听 127.0.0.1。",
+  "RAG": "检索增强生成：把 Markdown/TXT/JSON/HTML/PDF 文档切块后向量化入库，检索时混合 Chroma 向量与 BM25 关键词召回，回答带文件路径与章节来源。",
+  "DeepAgent": "以对话方式完成本地真实任务的智能体：通过知识库检索、长期记忆、文件/Git/命令工具、MCP 服务器与子智能体协同工作。",
+  "Embedding": "把文本映射为向量用于相似度检索；MiniC 默认使用阿里云百炼 text-embedding-v3，需配置 Provider、模型、Base URL 与 API Key。",
+  "Chroma": "MiniC 使用的向量数据库，存储知识库切块后的向量，配合 BM25 索引做混合检索。",
+  "IngestDirectory": "把目录内容增量写入知识库的内置工具，写操作需要审批。"
+}

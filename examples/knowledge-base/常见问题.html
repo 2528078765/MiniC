@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>MiniC 常见问题</title>
+</head>
+<body>
+  <h1>MiniC 常见问题</h1>
+
+  <h2>MiniC 是什么？</h2>
+  <p>MiniC 是一个本地优先的 AI 知识助手（DeepAgent），支持知识库问答、本地工具、会话与长期记忆、MCP/SKILL/子智能体，所有数据都留在你自己的机器上，核心服务只监听 127.0.0.1。</p>
+
+  <h2>如何配置模型？</h2>
+  <p>进入「设置 → 模型设置」，点击「添加供应商」，填写名称、Provider、Base URL、模型名与 API Key 后保存，再用「测试连接」验证；Embedding 在同一面板下方配置，默认使用阿里云百炼 text-embedding-v3。</p>
+
+  <h2>Bash 需要审批吗？</h2>
+  <p>需要。Bash 执行终端命令必须人工审批，审批菜单只提供 allow_once（本次放行）与 deny（拒绝）；命令输出会做 PII 脱敏（API Key、手机号、身份证号等）。</p>
+
+  <h2>知识库支持哪些格式？</h2>
+  <p>支持 Markdown、TXT、JSON、HTML、PDF。Markdown 按标题切分章节，PDF 按页与书签切分（扫描件暂不支持 OCR），JSON 按顶层 key 切分；默认入库扩展名为 .md/.txt/.html/.pdf，.json 默认不入库，需显式指定扩展名。</p>
+
+  <h2>写操作会被备份吗？</h2>
+  <p>会。写操作与 Format 执行前把目标文件备份到 &lt;项目&gt;/.minic/backups/，可回滚。</p>
+</body>
+</html>
