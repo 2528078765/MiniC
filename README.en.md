@@ -6,6 +6,12 @@ MiniC is primarily a CLI: type `minic` in any directory to start a conversation.
 
 > 中文说明见 [README.md](README.md)。
 
+## Version numbering
+
+Starting at 1.0.0, versions use decimal carry: `1.0.0 → 1.0.1 → … → 1.0.9 → 1.1.0` and `1.9.9 → 2.0.0`. Minor and patch components range from 0 to 9.
+
+Run `python scripts/bump_version.py` to increment and synchronize project metadata, runtime version, Windows file properties, and installer examples. Use `--dry-run` to preview or `--set 1.0.0` to specify a version. Rebuild the executable and installer afterward; the installer reads its version from the executable.
+
 ## Features
 
 - **Task activity**: execution commentary and tool steps appear live, with expandable arguments, output, and approval state. Activity collapses after the run, keeping step counts, outcomes, and elapsed time. The final response separately explains completed work, limits, and next steps, with Markdown and copy support. Saved activity can be reopened with the conversation.

@@ -4,13 +4,13 @@ MiniC 是一个本地的 AI 知识助手（DeepAgent）：支持向量化存储�
 
 MiniC 提供桌面端：从 Releases 下载安装包，安装即用。
 
-下载方式：[最新版本下载](https://github.com/2528078765/MiniC/releases/latest)（`MiniC-Setup-0.12.3.exe`，Windows 10/11 x64）
+下载方式：[最新版本下载](https://github.com/2528078765/MiniC/releases/latest)（`MiniC-Setup-1.0.0.exe`，Windows 10/11 x64）
 
 > English README: [README.en.md](README.en.md)
 
 ## 安装方式
 
-1. 下载 `MiniC-Setup-0.12.3.exe`，双击安装：自动创建开始菜单与桌面快捷方式，附卸载程序；默认免管理员安装到用户目录，也可选择安装给所有用户。
+1. 下载 `MiniC-Setup-1.0.0.exe`，双击安装：自动创建开始菜单与桌面快捷方式，附卸载程序；默认免管理员安装到用户目录，也可选择安装给所有用户。
 2. 安装完成后双击 MiniC 图标启动：**核心服务内嵌在桌面端进程内自动拉起**，不需要命令行、不需要单独启动任何服务。
 3. 首次启动自动生成 `~/.minic/minic.json`（完整默认配置模板，含全部字段）——**无需手写配置**；在设置里配置 API Key 后即可使用（见「配置 API Key」）。
 4. 数据目录：`~/.minic/`（配置、RAG 索引、记忆、日志），安装目录只放程序本体。
@@ -32,6 +32,12 @@ MiniC 提供桌面端：从 Releases 下载安装包，安装即用。
 MiniC 的总图由 LangGraph 编排：`route` 路由节点按意图分流到知识子图或动作子图，动作子图为教科书式 ReAct 结构（图上回边循环）。
 
 ![总图（xray 展开子图）](graph-super-xray.png)
+
+## 版本规则
+
+从 1.0.0 起采用十进制进位：`1.0.0 → 1.0.1 → … → 1.0.9 → 1.1.0`，`1.9.9 → 2.0.0`。中间位和末位范围均为 0–9。
+
+执行 `python scripts/bump_version.py` 递增版本，并同步项目配置、程序版本、Windows 文件属性及安装包下载示例；加 `--dry-run` 可预览，`--set 1.0.0` 可指定版本。随后重新构建程序和安装包，安装包自动读取程序版本。
 
 ## 环境要求
 
