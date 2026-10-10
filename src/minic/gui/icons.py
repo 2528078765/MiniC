@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QIcon, QPixmap
+from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap
 
 
 def _resolve_icon_dir() -> Path:
@@ -26,9 +26,18 @@ def icon_path(name: str) -> Path:
     return _ICON_DIR / f"{name}.png"
 
 
-def load_icon(name: str) -> QIcon:
-    """按名称加载 QIcon；文件缺失返回空 QIcon。"""
-    return QIcon(str(icon_path(name)))
+def load_icon(name: str, *, color: str | None = None) -> QIcon:
+    """按名称加载图标，可用指定颜色着色；保留原图的透明边缘。"""
+    if color is None:
+        return QIcon(str(icon_path(name)))
+    pixmap = QPixmap(str(icon_path(name)))
+    if pixmap.isNull():
+        return QIcon()
+    painter = QPainter(pixmap)
+    painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
+    painter.fillRect(pixmap.rect(), QColor(color))
+    painter.end()
+    return QIcon(pixmap)
 
 
 def load_pixmap(name: str, size: int = 16) -> QPixmap:

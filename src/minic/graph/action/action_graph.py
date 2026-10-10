@@ -4,6 +4,8 @@ from __future__ import annotations  # 延迟注解求值
 
 from typing import Any  # 任意类型
 
+from langgraph.types import RetryPolicy, TimeoutPolicy
+from minic.graph.policies import READ_RETRY
 from langgraph.graph import END, StateGraph  # LangGraph 图组件
 
 from minic.graph.action.action_node import (  # 动作节点逻辑
@@ -45,10 +47,10 @@ def build_action_graph(  # 构建动作子图
         return await action_answer_node(state, chat_model, memory_store, settings, skill_manager)  # 绑定依赖后调用回答逻辑
 
     builder = StateGraph(ChatState)  # 创建子图构建器
-    builder.add_node("extract_memory", extract_node)  # 注册记忆提取节点
-    builder.add_node("agent", agent_node_call)  # 注册决策节点
+    builder.add_node("extract_memory", extract_node, timeout=TimeoutPolicy(run_timeout=180))  # 注册记忆提取节点
+    builder.add_node("agent", agent_node_call, timeout=TimeoutPolicy(run_timeout=180))  # 注册决策节点
     builder.add_node("tools", tools_node_call)  # 注册工具执行节点
-    builder.add_node("answer", answer_node_call)  # 注册回答节点
+    builder.add_node("answer", answer_node_call, timeout=TimeoutPolicy(run_timeout=180))  # 注册回答节点
     builder.set_entry_point("extract_memory")  # 设置入口节点
     builder.add_conditional_edges(  # 按意图分流：动作类进 ReAct 循环，其余直接回答
         "extract_memory",  # 记忆提取节点

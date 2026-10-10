@@ -2,7 +2,8 @@
 
 from __future__ import annotations  # 延迟注解求值，兼容类型提示
 
-from typing import Any, TypedDict  # 引入 TypedDict 与任意类型
+from typing import Any, TypedDict, Annotated
+from langgraph.graph.message import add_messages
 
 
 class ChatState(TypedDict, total=False):  # 图状态类型，所有字段均可选
@@ -13,7 +14,7 @@ class ChatState(TypedDict, total=False):  # 图状态类型，所有字段均可
     project_root: str  # 项目数据落盘根目录
     user_message: str  # 用户本次输入
     history: list[dict[str, Any]]  # 会话历史消息
-    messages: list[Any]  # ReAct 循环消息列表（System/Human/AI tool_calls/ToolMessage）
+    messages: Annotated[list[Any], add_messages]
     documents: list[dict[str, Any]]  # 知识库文档清单
     intent: str  # 总图路由意图
     extracted_topics: list[dict[str, str]]  # 记忆提取结果
@@ -26,3 +27,5 @@ class ChatState(TypedDict, total=False):  # 图状态类型，所有字段均可
     message_id: str  # 当前消息 ID
     tool_context: list[dict[str, Any]]  # 已执行工具结果
     tool_loop_count: int  # 工具循环轮次
+    context_summary: str
+    summary_until_id: str

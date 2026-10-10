@@ -147,6 +147,10 @@ class _StreamFakeResponse:
         if self.status_code >= 400:
             raise RuntimeError(f"HTTP {self.status_code}")
 
+    @property
+    def is_error(self):
+        return self.status_code >= 400
+
     def iter_lines(self):
         for line in self._lines:
             yield line

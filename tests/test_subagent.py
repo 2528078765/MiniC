@@ -74,8 +74,11 @@ class FakeModel(BaseChatModel):
             return "最终回答。", None
         if "子 Agent" in system:
             if self.sub_decisions:
-                return json.dumps(self.sub_decisions.pop(0)), None
-            return json.dumps({"answer": self.sub_answer}), None
+                decision = self.sub_decisions.pop(0)
+                if decision.get("tool"):
+                    return "", {"name": decision["tool"], "args": decision.get("args") or {}, "id": f"child_{len(self.captured)}"}
+                return str(decision.get("answer", self.sub_answer)), None
+            return self.sub_answer, None
         if "意图路由" in system or "总图路由" in system:
             return json.dumps({"intent": "chat_action"}), None
         if "记忆提取" in system:
@@ -208,31 +211,15 @@ def _build_env(
 
 
 async def _run_graph_with_events(graph: Any, state: dict[str, Any], runtime: ToolRuntime) -> tuple[dict[str, Any], list[tuple[str, dict[str, Any]]]]:
-    """运行图并消费事件；遇到审批自动 allow_once。"""
-    queue: asyncio.Queue = asyncio.Queue()
-    runtime.attach("t1", lambda name, data: queue.put_nowait((name, data)))
-    events: list[tuple[str, dict[str, Any]]] = []
-    final: dict[str, Any] = {}
-
-    async def collect() -> None:
-        nonlocal final
-        config = {"configurable": {"thread_id": str(state.get("run_id") or state.get("thread_id") or "test")}}
-        async for mode, payload in graph.astream(state, config=config, stream_mode=["values"]):
-            if mode == "values":
-                final = payload
-
-    task = asyncio.create_task(collect())
-    while not task.done():
-        try:
-            name, data = await asyncio.wait_for(queue.get(), timeout=5)
-        except asyncio.TimeoutError:
-            break
-        events.append((name, data))
-        if name == "approval_requested":
-            runtime.approval_manager.submit(data["thread_id"], data["id"], "allow_once")
-    await task
-    while not queue.empty():
-        events.append(queue.get_nowait())
+    from langgraph.types import Command
+    events = []
+    runtime.attach("t1", lambda name, data: events.append((name, data)))
+    config = {"configurable": {"thread_id": "main-sub-test"}, "recursion_limit": 80}
+    final = await graph.ainvoke(state, config)
+    snapshot = await graph.aget_state(config)
+    while snapshot.interrupts:
+        final = await graph.ainvoke(Command(resume={item.id: "allow_once" for item in snapshot.interrupts}), config)
+        snapshot = await graph.aget_state(config)
     runtime.detach("t1")
     return final, events
 
@@ -326,17 +313,9 @@ def test_subagent_internal_tool_approval_carries_subagent_id(tmp_path: Any) -> N
         def emit(name: str, data: dict[str, Any]) -> None:
             queue.put_nowait((name, data))
 
-        task = asyncio.create_task(
-            env["manager"].run(task="读取文件内容", allowed_tools=["Read"], budget=4, emit=emit)
-        )
-        approval_data: dict[str, Any] = {}
-        while True:
-            name, data = await asyncio.wait_for(queue.get(), timeout=5)
-            if name == "approval_requested":
-                approval_data = data
-                env["approval"].submit(data["thread_id"], data["id"], "allow_once")
-                break
-        result = await task
+        result = await env["manager"].run(task="读取文件内容", allowed_tools=["Read"], budget=4, emit=emit)
+        approval_data = result["pending_approvals"][0]
+        result = await env["manager"].resume(result["subagent_id"], approval_data["id"], "allow_once")
         assert result["status"] == "completed"
         assert result["output"] == "子任务完成"
         assert approval_data.get("subagent_id")
@@ -370,15 +349,9 @@ def test_subagent_denied_tool_continues_and_answers(tmp_path: Any) -> None:
         def emit(name: str, data: dict[str, Any]) -> None:
             queue.put_nowait((name, data))
 
-        task = asyncio.create_task(
-            env["manager"].run(task="读取文件内容", allowed_tools=["Read"], budget=4, emit=emit)
-        )
-        while True:
-            name, data = await asyncio.wait_for(queue.get(), timeout=5)
-            if name == "approval_requested":
-                env["approval"].submit(data["thread_id"], data["id"], "deny")
-                break
-        result = await task
+        result = await env["manager"].run(task="读取文件内容", allowed_tools=["Read"], budget=4, emit=emit)
+        approval_data = result["pending_approvals"][0]
+        result = await env["manager"].resume(result["subagent_id"], approval_data["id"], "deny")
         assert result["status"] == "completed"
         assert result["output"] == "子任务完成"
 
@@ -525,5 +498,5 @@ def test_tool_loop_delegates_to_subagent_and_result_enters_tool_context(tmp_path
     assert "approval_requested" in names  # DelegateToSubagent 默认需要审批
     tool_context = final["tool_context"]
     assert tool_context[0]["tool"] == "DelegateToSubagent"
-    assert tool_context[0]["status"] == "completed"
+    assert tool_context[0]["status"] == "success"
     assert tool_context[0]["output"] == "子任务完成"

@@ -4,7 +4,6 @@ from __future__ import annotations  # 延迟注解求值
 
 import json  # JSON 解析
 import re  # 正则兜底
-import uuid  # 工具调用 ID
 from typing import Any  # 任意类型
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage  # 消息类型
@@ -14,14 +13,13 @@ from minic.graph.common import (  # 公共工具
     append_mcp_block,  # 追加 MCP 工具清单块
     memory_workspace,  # 记忆根目录
     merged_memory_text,  # 合并记忆
+    response_messages,
     parse_model_json,  # JSON 解析
     stream_answer,  # 流式回答
     tool_system_prompt,  # 工具提示
 )  # 导入结束
 from minic.graph.state import ChatState  # 图状态
-from minic.graph.tools import get_tool  # 工具注册表
-from minic.memory import LongTermMemoryStore  # 长期记忆存储
-from minic.middleware import retry_async  # 网络错误重试
+from minic.memory import LongTermMemoryStore, parse_topics  # 长期记忆存储
 from minic.skills import skill_inject_text  # SKILL 注入文本
 
 
@@ -88,7 +86,8 @@ async def extract_memory_node(  # 记忆提取节点
                 "你是 MiniC 记忆提取器。从用户消息中提取稳定、可跨会话复用的信息。"  # 角色定义
                 "只输出 JSON 数组，每项为 {\"topic\": \"主题\", \"content\": \"内容\", \"scope\": \"global|project\"}。"  # 输出格式
                 "用户个人信息（姓名、偏好、位置、职业、身份、习惯、备注等）scope 为 global；"  # 全局分类规则
-                "项目约定、项目级偏好、可复用工作流 scope 为 project。"  # 项目分类规则
+                "只有用户对当前项目明确陈述的长期约定、项目级偏好、可复用工作流 scope 为 project。"
+                "临时任务参数、提问、引用资料、其他项目的信息不要保存为当前项目规则。"
                 "不要解释，不要礼貌回应，不要评价内容。"  # 输出约束
                 "示例：用户说“我的名字是张三” -> [{\"topic\": \"姓名\", \"content\": \"张三\", \"scope\": \"global\"}]；"  # 全局示例
                 "用户说“这个项目约定用 Python” -> [{\"topic\": \"项目约定\", \"content\": \"用 Python\", \"scope\": \"project\"}]。"  # 项目示例
@@ -97,7 +96,7 @@ async def extract_memory_node(  # 记忆提取节点
         ),  # 系统提示结束
         HumanMessage(content=state["user_message"]),  # 用户消息
     ]  # 消息结束
-    response = await retry_async(lambda: chat_model.ainvoke(messages), max_retries=2)  # 调用模型并重试
+    response = await chat_model.ainvoke(messages)  # 调用模型并重试
     try:  # 解析提取结果
         topics = parse_model_json(response.content)  # 解析 JSON 数组
     except (json.JSONDecodeError, TypeError, AttributeError):  # 解析失败
@@ -123,78 +122,28 @@ async def extract_memory_node(  # 记忆提取节点
             {**item, "scope": classify_scope(item["topic"], item["content"])}  # 为兜底结果补作用域
             for item in _fallback_extract(state["user_message"])  # 遍历兜底结果
         ]  # 兜底结束
+    confirmations: list[str] = []
     for item in extracted:  # 写入长期记忆
         if memory_store is not None:  # 有记忆存储
-            if item.get("scope") == "project":  # 项目作用域
-                memory_store.add_topic(  # 项目约定写入项目长期记忆
-                    "project",  # 项目作用域
-                    memory_workspace(state),  # 项目落盘根目录
-                    item["topic"],  # 主题
-                    item["content"],  # 内容
-                    source="user",  # 来源为用户
-                )  # 写入结束
-            else:  # 全局作用域
-                memory_store.add_topic(  # 个人信息写入全局长期记忆
-                    "global",  # 全局作用域
-                    None,  # 全局记忆不需要工作区
-                    item["topic"],  # 主题
-                    item["content"],  # 内容
-                    source="user",  # 来源为用户
-                )  # 写入结束
+            scope = item["scope"]
+            workspace = memory_workspace(state) if scope == "project" else None
+            changed = memory_store.add_topic(scope, workspace, item["topic"], item["content"], source="user")
+            saved = memory_store.read(scope, workspace)
+            label = "项目记忆" if scope == "project" else "全局记忆"
+            if parse_topics(saved["content"]).get(item["topic"]) == item["content"]:
+                status = "已保存" if changed else "已存在，无需重复保存"
+                confirmations.append(f"{status}：{label}「{item['topic']}」\n文件：{saved['path']}")
+            else:
+                confirmations.append(f"未保存：{label}「{item['topic']}」，已有记忆保护规则阻止了写入。")
+        else:
+            confirmations.append(f"未保存：「{item['topic']}」，长期记忆存储未启用。")
     result: dict[str, Any] = {  # 节点返回结果
         "extracted_topics": extracted,  # 提取结果
-        "confirmation": "好的，我记住了。" if extracted else "",  # 确认回复
+        "confirmation": "\n\n".join(confirmations),  # 基于实际落盘结果确认
     }  # 结果结束
     if extracted:  # 有提取结果
         result["intent"] = "user_info"  # 有提取结果时动作子图走确认回复
     return result  # 返回结果
-
-
-def _normalize_tool_name(name: str) -> str:  # 工具名净化
-    """把注册名转成 OpenAI 合法工具名（仅 [a-zA-Z0-9_-]，如 MCP 的点号改下划线）。"""  # 函数说明
-    return re.sub(r"[^a-zA-Z0-9_-]", "_", name)  # 非法字符替换为下划线
-
-
-def _resolve_tool_name(call_name: str) -> str | None:  # 反查原始工具名
-    """按净化名反查注册表原始工具名（原生 tool_calls 返回的是净化名）。"""  # 函数说明
-    from minic.graph.tools import list_tools  # 延迟导入避免循环
-
-    for candidate in list_tools():  # 遍历注册表
-        if _normalize_tool_name(candidate.name) == call_name:  # 净化后匹配
-            return candidate.name  # 返回原始名
-    return None  # 未找到
-
-
-def _openai_tool_specs() -> list[dict[str, Any]]:  # 生成 OpenAI 工具定义
-    """把注册表工具转 OpenAI function 格式（``bind_tools`` 原生工具调用用）。
-
-    内置工具 args_schema 为 ``{参数名: Python类型}``；MCP 工具为同构
-    （未知类型为 ``"any"``），统一转换。工具名净化（API 只允许字母数字下划线）。
-    """
-    from minic.graph.tools import list_tools  # 延迟导入避免循环
-
-    type_map = {str: "string", int: "integer", float: "number", bool: "boolean", list: "array", dict: "object"}  # 类型映射
-    specs: list[dict[str, Any]] = []  # 工具定义列表
-    for tool in list_tools():  # 遍历注册表（内置 + MCP）
-        properties: dict[str, Any] = {}  # 参数属性
-        for name, kind in (tool.args_schema or {}).items():  # 逐个参数
-            json_type = type_map.get(kind, "")  # 未知类型不约束
-            properties[name] = {"type": json_type} if json_type else {}  # 属性定义
-        specs.append(  # 追加 OpenAI 工具定义
-            {
-                "type": "function",  # 函数类型
-                "function": {  # 函数定义
-                    "name": _normalize_tool_name(tool.name),  # 净化后的工具名
-                    "description": tool.description,  # 描述
-                    "parameters": {  # JSON Schema 参数
-                        "type": "object",  # 对象
-                        "properties": properties,  # 属性
-                        "required": list(properties.keys()),  # 全部必填
-                    },  # 参数结束
-                },  # 函数结束
-            }
-        )  # 追加结束
-    return specs  # 返回列表
 
 
 async def agent_node(  # ReAct 决策节点
@@ -211,25 +160,24 @@ async def agent_node(  # ReAct 决策节点
     ToolMessage，langchain 原样回传 reasoning_content，DeepSeek thinking
     模式安全）。
     """
-    del memory_store, settings  # 本节点不需要记忆与配置
-    messages: list[Any] = list(state.get("messages") or [])  # 已有消息（续轮）
-    if not messages:  # 首轮：构建初始消息
-        history_lines = [  # 会话历史文本（跨轮历史文本化，避免重构 tool_calls 消息）
-            f"{message.get('role')}: {message.get('content')}"  # 单条历史
-            for message in state.get("history", [])[:-1]  # 跳过本次用户消息
-        ]  # 历史结束
-        system_text = tool_system_prompt()  # 工具提示
-        system_text = append_documents_block(system_text, state.get("documents") or [])  # 常驻文档清单
-        system_text = append_mcp_block(system_text)  # 常驻已连接 MCP 工具清单
-        skill_text = skill_inject_text(skill_manager)  # SKILL 注入
-        if skill_text:  # 有启用 SKILL
-            system_text += f"\n\n当前启用的 SKILL 能力：\n{skill_text}"  # 注入 SKILL
-        messages = [SystemMessage(content=system_text)]  # 系统提示
-        if history_lines:  # 有历史
-            messages.append(HumanMessage(content="会话历史：\n" + "\n".join(history_lines)))  # 历史注入
-        messages.append(HumanMessage(content=state["user_message"]))  # 本次用户消息
-    tool_specs = _openai_tool_specs()  # 工具定义
-    bound = chat_model.bind_tools(tool_specs) if tool_specs else chat_model  # 绑定原生工具
+    from langchain_core.messages import message_chunk_to_message
+    from minic.graph.native_tools import native_tools
+    from minic.graph.common import model_messages
+    messages = model_messages(state, settings)
+    if not messages:
+        messages = [HumanMessage(content=state["user_message"])]
+    system_text = append_mcp_block(append_documents_block(tool_system_prompt(), state.get("documents") or []))
+    memory_text = merged_memory_text(state, memory_store, settings)
+    if memory_text:
+        system_text += f"\n\n项目约定与长期记忆：\n{memory_text}"
+    skill_text = skill_inject_text(skill_manager)
+    if skill_text:
+        system_text += f"\n\n当前启用的 SKILL 能力：\n{skill_text}"
+    tools = native_tools() if int(state.get("tool_loop_count", 0)) < 8 else []
+    if not tools:
+        system_text += "\n本轮工具预算已用尽，请依据已有结果总结完成事项、未完成事项和下一步，不再调用工具。"
+    bound = chat_model.bind_tools(tools) if tools else chat_model
+    messages = [SystemMessage(content=system_text), *messages]
     chunks: list[Any] = []  # 流式 chunk
     async for chunk in bound.astream(messages):  # 流式调用（最终答案 token 实时转发）
         chunks.append(chunk)  # 收集
@@ -239,7 +187,11 @@ async def agent_node(  # ReAct 决策节点
             response = response + extra  # AIMessageChunk 相加合并
     else:  # 无输出
         response = AIMessage(content="")  # 空消息
-    return {"messages": messages + [response]}  # 返回消息增量
+    response = message_chunk_to_message(response)
+    if response.tool_calls and not tools:
+        closed = [ToolMessage(content="本轮工具预算已用尽，该调用未执行", tool_call_id=call["id"]) for call in response.tool_calls]
+        return {"messages": response_messages(state, [response, *closed, AIMessage(content="本轮工具预算已用尽，已完成的操作保留在执行记录中。请检查结果后继续未完成的事项。")])}
+    return {"messages": response_messages(state, [response])}
 
 
 async def tools_node(  # ReAct 工具执行节点
@@ -251,49 +203,9 @@ async def tools_node(  # ReAct 工具执行节点
     每个调用走 tool_runtime（含审批中断、沙箱、事件发射），结果记录
     进 tool_context；ToolMessage 原样入 messages（短期记忆同步落盘）。
     """
-    messages = list(state.get("messages") or [])  # 消息列表
-    last = messages[-1] if messages else None  # 最后一条
-    tool_context = list(state.get("tool_context", []))  # 已有结果
-    if tool_runtime is None or not (isinstance(last, AIMessage) and last.tool_calls):  # 无可执行调用
-        return {"tool_context": tool_context}  # 直接返回
-    outputs: list[ToolMessage] = []  # ToolMessage 增量
-    for call in last.tool_calls:  # 逐个工具调用
-        name = str(call.get("name") or "")  # 工具名（净化名）
-        args = call.get("args") or {}  # 参数
-        call_id = str(call.get("id") or f"tool-{len(tool_context)}")  # 调用 ID
-        resolved = name if get_tool(name) is not None else _resolve_tool_name(name)  # 反查原始注册名（MCP 点号净化）
-        if not resolved:  # 未注册工具
-            outputs.append(ToolMessage(content=f"工具 {name} 不存在", tool_call_id=call_id))  # 错误消息
-            continue  # 下一个
-        result = await tool_runtime.execute(  # 共享执行核心（审批中断在内部）
-            thread_id=state.get("thread_id", ""),  # 会话 ID
-            run_id=state.get("run_id", ""),  # 运行 ID
-            tool=resolved,  # 原始工具名
-            args=args,  # 参数
-            project_root=state.get("project_root") or None,  # 请求级项目根（工作区目录）
-        )  # 执行结束
-        tool_context.append(  # 记录工具结果
-            {  # 结果字段
-                "role": "tool",  # 消息角色
-                "tool_call_id": result.get("tool_call_id"),  # 调用 ID
-                "tool": resolved,  # 原始工具名
-                "args": args,  # 参数
-                "status": result.get("status"),  # 状态
-                "output": result.get("output"),  # 输出
-                "backup_id": result.get("backup_id"),  # 备份 ID
-            }  # 结果结束
-        )  # 追加结束
-        outputs.append(  # 追加 ToolMessage
-            ToolMessage(
-                content=str(result.get("output") or result.get("status") or ""),  # 结果文本
-                tool_call_id=call_id,  # 与 AIMessage.tool_calls id 配对
-            )
-        )  # 追加结束
-    return {  # 返回增量
-        "messages": messages + outputs,  # 消息列表
-        "tool_context": tool_context,  # 工具结果记录
-        "tool_loop_count": int(state.get("tool_loop_count", 0)) + 1,  # 轮次加一
-    }  # 返回结束
+    from minic.graph.native_tools import execute_calls
+    return await execute_calls(state, tool_runtime)
+
 
 
 def should_continue(state: ChatState) -> str:  # ReAct 条件边
@@ -316,11 +228,11 @@ def _extract_final_answer(state: ChatState) -> str:  # 提取最终回答
     由回答节点兜底重新生成（不在界面上显示裸标记）。
     """
     messages = state.get("messages") or []  # 消息列表
-    for message in reversed(messages):  # 从后往前
-        if isinstance(message, AIMessage) and not message.tool_calls:  # 最终回答轮
-            content = str(getattr(message, "content", "") or "").strip()  # 回答文本
-            if content and not _TOOL_NULL_MARKER.match(content):  # 有效文本
-                return content  # 返回最终回答
+    last = messages[-1] if messages else None
+    if isinstance(last, AIMessage) and not last.tool_calls:
+        content = str(last.content or "").strip()
+        if content and not _TOOL_NULL_MARKER.match(content):
+            return content
     return ""  # 未产出文本
 
 
@@ -330,24 +242,23 @@ async def action_answer_node(  # 动作回答节点
     memory_store: LongTermMemoryStore | None,  # 长期记忆存储
     settings: Any,  # 应用配置
     skill_manager: Any = None,  # SKILL 管理器
-) -> dict[str, str]:  # 返回回答
+) -> dict[str, Any]:  # 返回回答
     """按意图处理：chat_action 提取 agent 最终回答；user_info/memory_query 单独生成。"""  # 函数说明
+    from minic.graph.common import model_messages
     intent = state.get("intent", "chat_action")  # 读取意图
     memory_text = merged_memory_text(state, memory_store, settings)  # 读取合并记忆
-    if intent == "user_info":  # 刚写入个人信息
-        system_text = (  # 确认提示
-            "你是 MiniC 助手。用户刚刚提供了个人信息。"  # 场景说明
-            "请用一句话简短确认，不要复述具体信息。"  # 输出约束
-        )  # 提示结束
+    if intent == "user_info":  # 记忆操作由系统执行，回执直接采用实际结果
+        answer = state.get("confirmation") or "本轮没有可确认的记忆保存结果。"
+        return {"answer": answer, "messages": response_messages(state, [AIMessage(content=answer)])}
     elif intent == "memory_query":  # 用户询问自己的信息
         if memory_text:  # 有记忆
             system_text = (  # 记忆回答提示
-                "你是 MiniC 助手。请根据长期记忆回答用户关于自己的问题。"  # 指令
+                "你是 MiniC 助手。请根据长期记忆回答用户关于自己的问题或当前项目背景、约定和长期规则的问题。"
                 "直接输出纯文本答案，不要使用 JSON 包装。\n\n"  # 输出约束
                 f"长期记忆：\n{memory_text}"  # 注入记忆
             )  # 提示结束
         else:  # 无记忆
-            system_text = "你是 MiniC 助手。没有找到用户的个人信息，请直接回复：未检索到。"  # 无记忆回答
+            system_text = "你是 MiniC 助手。没有找到相关长期记忆，请说明未检索到足够依据，不要编造。"
     else:  # 普通聊天：教科书式提取 agent 最终回答（agent 已基于工具结果作答）
         answer = _extract_final_answer(state)  # 提取最终回答
         if answer:  # agent 已作答
@@ -362,6 +273,8 @@ async def action_answer_node(  # 动作回答节点
         )  # 提示结束
         system_text = append_documents_block(system_text, state.get("documents") or [])  # 常驻文档清单
         system_text = append_mcp_block(system_text)  # 常驻已连接 MCP 工具清单
+        if memory_text:
+            system_text += f"\n\n长期记忆：\n{memory_text}"
         tool_context = state.get("tool_context", [])  # 工具结果
         if tool_context:  # 有工具结果
             tool_block = "\n\n".join(  # 拼接结果块
@@ -380,8 +293,9 @@ async def action_answer_node(  # 动作回答节点
             system_text,  # 系统提示
             state.get("history", []),  # 历史
             state["user_message"],  # 用户消息
+            native_messages=model_messages(state, settings),
         )  # 回答结束
-        return {"answer": answer}  # 返回回答
+        return {"answer": answer, "messages": response_messages(state, [AIMessage(content=answer)])}  # 返回回答
     skill_text = skill_inject_text(skill_manager)  # 读取启用的 SKILL 注入文本
     if skill_text:  # 有启用的 SKILL
         system_text += f"\n\n当前启用的 SKILL 能力：\n{skill_text}"  # 注入 SKILL 描述
@@ -390,5 +304,6 @@ async def action_answer_node(  # 动作回答节点
         system_text,  # 系统提示
         state.get("history", []),  # 历史
         state["user_message"],  # 用户消息
+            native_messages=model_messages(state, settings),
     )  # 回答结束
-    return {"answer": answer}  # 返回回答
+    return {"answer": answer, "messages": response_messages(state, [AIMessage(content=answer)])}  # 返回回答

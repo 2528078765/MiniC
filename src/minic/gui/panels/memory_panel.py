@@ -41,6 +41,7 @@ class MemoryPanel(PanelBase):
     ) -> None:
         super().__init__(client, toast, parent, workspace, notify, progress)
         self._saved_content = ""  # 已保存内容快照（放弃修改时回滚用）
+        self._memory_version = None
 
         root = QVBoxLayout(self)
         root.setContentsMargins(4, 4, 4, 4)
@@ -53,7 +54,7 @@ class MemoryPanel(PanelBase):
         )
         header.addWidget(title)
 
-        badge = QLabel("全局", self)
+        badge = QLabel("全局记忆", self)
         badge.setStyleSheet(
             f"background-color: #37373d; color: {COLOR_TEXT_SECONDARY}; border-radius: 10px;"
             f"padding: 2px 10px; font-size: 12px;"
@@ -64,7 +65,8 @@ class MemoryPanel(PanelBase):
         self._make_edit_button(header)
         root.addLayout(header)
 
-        desc = QLabel("管理全局长期记忆（~/.minic/memory/minic.md）。点右上角「编辑」后修改，保存才写入记忆文件。", self)
+        desc = QLabel("这里管理全局记忆。项目约定保存在对应项目目录的 Agent.md，可直接编辑；MiniC 每轮对话都会重新读取。", self)
+        self._path_label = desc
         desc.setWordWrap(True)
         desc.setStyleSheet(
             f"color: {COLOR_TEXT_MUTED}; font-size: 12px; background: transparent; border: none;"
@@ -104,7 +106,7 @@ class MemoryPanel(PanelBase):
         if self.client is None or not getattr(self.client, "base_url", None):
             from minic.gui.local_data import local_memory
 
-            self._on_memory_loaded(local_memory("global", self.workspace))
+            self._on_memory_loaded(local_memory("global"))
             return
         worker = Worker(lambda: self.client.get_memory(scope="global"), self)
         worker.completed.connect(self._on_memory_loaded)
@@ -117,6 +119,9 @@ class MemoryPanel(PanelBase):
             content = str(data.get("content", "") or "")
             self._editor.setPlainText(content)
             self._saved_content = content
+            self._memory_version = data.get("version")
+            if data.get("path"):
+                self._path_label.setText(f"全局记忆文件：{data['path']}\n项目约定请在对应项目目录中查看和编辑 Agent.md。")
 
     def save(self) -> bool:
         """保存全局长期记忆（mode=replace），成功后回只读并通知反馈。"""
@@ -127,10 +132,11 @@ class MemoryPanel(PanelBase):
         if self.client is None or not getattr(self.client, "base_url", None):
             self.notify("保存失败：核心未运行", "failed")
             return False
-        payload = {"scope": "global", "content": content, "mode": "replace"}
+        payload = {"scope": "global", "content": content,
+                   "mode": "replace", "base_version": self._memory_version}
         worker = Worker(lambda: self.client.post_memory(payload), self)
         worker.completed.connect(
-            lambda ok: (self.notify("已保存全局长期记忆", "success"), self._on_saved(content))
+            lambda ok: (self.notify("已保存长期记忆", "success"), self._on_saved(content), self.reload())
             if ok
             else self.notify("保存失败", "failed")
         )

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,7 @@ class ToolExecutionLog:
         with self.path.open("a", encoding="utf-8") as file:
             file.write(json.dumps(record, ensure_ascii=False) + "\n")
             file.flush()
+            os.fsync(file.fileno())
 
     def read(self) -> list[dict[str, Any]]:
         """读取全部日志。"""

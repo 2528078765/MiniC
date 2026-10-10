@@ -208,9 +208,76 @@ def merged_memory_text(  # 读取合并记忆文本
     """读取并注入合并后的长期记忆。"""  # 函数说明
     if memory_store is None:  # 无记忆存储时不注入
         return ""  # 返回空文本
-    memory_data = memory_store.read("merged", memory_workspace(state))  # 合并读取全局与项目长期记忆
+    memory_data = memory_store.read("global")
+    project_data = memory_store.read("project", memory_workspace(state))
     threshold = getattr(getattr(settings, "memory", None), "long_term_inject_threshold_tokens", 4000)  # 读取注入阈值
-    return memory_injection(memory_data.get("content", ""), threshold)  # 超过阈值时注入摘要
+    global_text = memory_injection(memory_data.get("content", ""), threshold)
+    project_text = project_data.get("content", "")
+    return "\n\n".join(part for part in (global_text, f"项目 Agent.md：\n{project_text}" if project_text else "") if part)
+
+
+def continuation_messages(state: dict) -> list[Any]:
+    """补充消息在工具结果完整后注入；稳定 ID 防止恢复和循环时重复追加。"""
+    from langgraph.config import get_config
+    try:
+        pending = get_config().get("configurable", {}).get("continuation_messages", [])
+    except RuntimeError:
+        pending = []
+    existing = {message.id for message in state.get("messages", [])}
+    return [message for message in pending if message.id not in existing]
+
+
+def response_messages(state: dict, messages: list[Any]) -> list[Any]:
+    return [*continuation_messages(state), *messages]
+
+
+def model_messages(state: dict, settings: Any = None) -> list[Any]:
+    """按消息边界裁剪模型上下文，完整对话仍保存在检查点和展示副本。"""
+    from langchain_core.messages import trim_messages
+    messages = [*(state.get("messages") or []), *continuation_messages(state)]
+    limit = getattr(getattr(settings, "sandbox", None), "summarize_threshold_chars", 12000)
+    def size(items):
+        return sum(len(str(item.content)) + len(str(getattr(item, "tool_calls", []) or "")) for item in items)
+    if not messages or size(messages) <= limit:
+        return messages
+    summary = str(state.get("context_summary") or "")
+    available = max(limit - len(summary) - 10, 1)
+    trimmed = trim_messages(messages, max_tokens=available, token_counter=size,
+                            strategy="last", start_on="human", allow_partial=False)
+    if not trimmed:
+        # 当前轮不能切掉 Human/AI(tool_calls)/Tool 的任何半条配对。
+        start = max((i for i, item in enumerate(messages) if item.type == "human"), default=0)
+        trimmed = messages[start:]
+    return ([SystemMessage(content=f"会话摘要：\n{summary}")] if summary else []) + trimmed
+
+
+async def prepare_context(state: dict, chat_model: Any, settings: Any) -> dict:
+    """摘要是图内的业务节点；消息持久化、边界裁剪和恢复仍使用原生状态。"""
+    messages = list(state.get("messages") or [])
+    candidate = [item for item in model_messages(state, settings) if item.type != "system"]
+    if not candidate or len(candidate) == len(messages):
+        return {}
+    start = next((index for index, item in enumerate(messages) if item.id == candidate[0].id), 0)
+    older = messages[:start]
+    if not older:
+        return {}
+    anchor = state.get("summary_until_id")
+    consumed = next((i + 1 for i, item in enumerate(older) if item.id == anchor), 0)
+    batch = older[consumed:]
+    if not batch:
+        return {}
+    previous = str(state.get("context_summary") or "")
+    prompt = "总结以下对话，保留用户问题、约定、完成事项与未完成事项；只输出简短摘要。"
+    if previous:
+        prompt += f"\n已有摘要：\n{previous}\n请合并新信息。"
+    try:
+        response = await chat_model.ainvoke([SystemMessage(content=prompt), *batch])
+        limit = getattr(getattr(settings, "sandbox", None), "summarize_threshold_chars", 12000)
+        summary = str(response.content).strip()[:max(min(limit // 3, 2000), 1)]
+        return {"context_summary": summary, "summary_until_id": older[-1].id}
+    except Exception:
+        # 摘要服务失败不会使原本可继续的会话失败，原生消息窗口仍然有效。
+        return {}
 
 
 def tool_system_prompt() -> str:  # 生成工具调用系统提示
@@ -228,7 +295,11 @@ def tool_system_prompt() -> str:  # 生成工具调用系统提示
         "不要使用 ls、~、/home、/dev 等 Linux 语法。\n"  # 禁止 Linux 语法
         "需要调用工具时使用函数调用（function calling）；"  # 原生工具调用
         "不需要调用工具时直接用自然语言回答用户，"  # 直接回答
-        "不要输出 JSON、DSML、XML 等任何工具调用标记。"  # 输出约束
+        "不要输出 JSON、DSML、XML 等任何工具调用标记。\n"  # 输出约束
+        "执行工具时，可以简短说明当前要做的事。完成后给出面向用户的总结："
+        "先说明结果，再说明实际完成的主要事项、未完成的事项或限制，以及用户需要做的下一步。"
+        "只有工具结果证实的操作才能声称已完成，不要把计划说成完成；"
+        "普通聊天直接简洁回答，不必套用任务总结格式。"
     )  # 提示结束
 
 
@@ -278,10 +349,11 @@ async def stream_answer(  # 流式生成回答
     system_text: str,  # 系统提示词
     history: list[dict[str, Any]],  # 会话历史
     user_message: str,  # 用户消息
-    tool_context: list[dict[str, Any]] | None = None,  # 工具结果
+    tool_context: list[dict[str, Any]] | None = None,
+    native_messages: list[Any] | None = None,  # 工具结果
 ) -> str:  # 返回回答文本
     """按系统提示生成流式回答并解包 JSON。"""  # 函数说明
-    messages = build_messages(system_text, history, user_message, tool_context)  # 组装消息
+    messages = [SystemMessage(content=system_text), *native_messages] if native_messages else build_messages(system_text, history, user_message, tool_context)  # 组装消息
     parts: list[str] = []  # 收集回答分片
     async for chunk in chat_model.astream(messages):  # 流式调用模型
         if chunk.content:  # 忽略空分片

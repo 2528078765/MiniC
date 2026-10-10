@@ -8,6 +8,8 @@ MiniC is primarily a CLI: type `minic` in any directory to start a conversation.
 
 ## Features
 
+- **Task activity**: execution commentary and tool steps appear live, with expandable arguments, output, and approval state. Activity collapses after the run, keeping step counts, outcomes, and elapsed time. The final response separately explains completed work, limits, and next steps, with Markdown and copy support. Saved activity can be reopened with the conversation.
+
 - **RAG knowledge-base Q&A**: ingest Markdown / TXT / JSON / HTML / PDF knowledge bases — Markdown is split by headings, PDF by page + bookmarks (scanned PDFs are not OCR'd), JSON by top-level keys — hybrid retrieval with Chroma vectors + BM25 keyword search (0.55 / 0.45 weighting), automatic query rewriting, answers with `file path + section` sources; incremental ingestion with `metadata.json` as the single source of truth. By default `.md` / `.txt` / `.html` / `.pdf` are ingested; `.json` is not ingested by default and must be specified explicitly by extension.
 - **Local tools with approval**: built-in Read / Write / Edit / TextSearch / Lint / Format / Bash / Git tools; write operations back up the file first and support rollback; sensitive operations prompt for inline approval.
 - **Sessions & memory**: multi-session create / resume / compress / archive / delete with automatic backup before destructive actions; long-term memory split into global and project scopes — personal information is written to the global memory, project conventions to the project memory, with automatic deduplication and user-content priority.
@@ -30,7 +32,7 @@ MiniC is primarily a CLI: type `minic` in any directory to start a conversation.
 cd MiniC
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-python -m pip install -e ".[dev]"
+python -m pip install -e ".[dev,gui]"
 ```
 
 ## Global command install / uninstall
@@ -46,7 +48,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\install-global.ps1
 - If a new window still cannot find `minic`, refresh PATH in the current terminal and retry:
 
   ```powershell
-  $env:Path += ";C:\Users\25280\Desktop\AgentProject\MiniC\.venv\Scripts;C:\Users\25280\.minic\bin"
+  $env:Path += ";$PWD\.venv\Scripts;$env:USERPROFILE\.minic\bin"
   ```
 
 To uninstall the global command:
@@ -302,7 +304,7 @@ The core service listens only on `127.0.0.1`. Every endpoint except `/health` re
 | GET | `/agents` | Recent sub-task list |
 | GET | `/agents/{subagent_id}` | Single sub-task status |
 
-The SSE event sequence of `POST /chat/stream` is: `message_start` → `token` → `tool_call` →（`approval_requested` → `approval_result`）→ `tool_result` → `message_end` → `done`; the `sources` field of the `done` event drives the `file path + section` citations.
+The SSE event sequence of `POST /chat/stream` is: `message_start` → `token` → `tool_call` →（`approval_requested` → `approval_result`）→ `tool_result` → `answer` → `message_end` → `done`. Tool and token events may repeat. `token.channel` is `activity` (public execution commentary) or `answer` (response); existing clients can still read `delta`. `answer.text` is the authoritative final response; the desktop replaces its result text to avoid duplicates. `done.sources` drives source citations.
 
 > Note: `PUT /settings` performs a partial update and persists to the target `minic.json`; most settings in the current process take effect on the next request.
 

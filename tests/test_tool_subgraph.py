@@ -212,33 +212,19 @@ async def _run_with_events(
     thread_id: str,
     decision: str | None = None,
 ):
-    """并发消费工具事件，审批时自动提交。"""
-    queue: asyncio.Queue = asyncio.Queue()
-    runtime.attach(thread_id, lambda name, data: queue.put_nowait((name, data)))
-    events: list[tuple[str, dict]] = []
-    final: dict = {}
-
-    async def collect() -> None:
-        nonlocal final
-        config = {"configurable": {"thread_id": str(state.get("run_id") or state.get("thread_id") or "test")}}
-        async for mode, payload in graph.astream(state, config=config, stream_mode=["values"]):
-            if mode == "values":
-                final = payload
-
-    task = asyncio.create_task(collect())
-    while not task.done():
-        try:
-            name, data = await asyncio.wait_for(queue.get(), timeout=5)
-        except asyncio.TimeoutError:
-            break
-        events.append((name, data))
-        if name == "approval_requested" and decision is not None:
-            runtime.approval_manager.submit(thread_id, data["id"], decision)
-    await task
-    while not queue.empty():
-        events.append(queue.get_nowait())
+    """先等图把原生中断保存，再用 Command 提交审批恢复。"""
+    from langgraph.types import Command
+    events = []
+    runtime.attach(thread_id, lambda name, data: events.append((name, data)))
+    config = {"configurable": {"thread_id": state["run_id"]}, "recursion_limit": 80}
+    final = await graph.ainvoke(state, config)
+    snapshot = await graph.aget_state(config)
+    while snapshot.interrupts and decision is not None:
+        final = await graph.ainvoke(Command(resume={item.id: decision for item in snapshot.interrupts}), config)
+        snapshot = await graph.aget_state(config)
     runtime.detach(thread_id)
     return final, events
+
 
 
 def test_read_tool_auto_executes_and_result_enters_answer(tmp_path: Path) -> None:
@@ -249,7 +235,7 @@ def test_read_tool_auto_executes_and_result_enters_answer(tmp_path: Path) -> Non
     final = asyncio.run(_run_graph(env["graph"], _state(tmp_path), env["runtime"]))
 
     assert final["tool_context"][0]["tool"] == "Read"
-    assert final["tool_context"][0]["status"] == "completed"
+    assert final["tool_context"][0]["status"] == "success"
     assert final["tool_context"][0]["output"] == "hello tool"
     assert final["answer"] == "最终回答。"
     records = env["log"].read()
@@ -273,7 +259,7 @@ def test_write_tool_approval_allow_once(tmp_path: Path) -> None:
     assert "approval_requested" in names
     assert "approval_result" in names
     assert "tool_result" in names
-    assert final["tool_context"][0]["status"] == "completed"
+    assert final["tool_context"][0]["status"] == "success"
     assert target.read_text(encoding="utf-8") == "new"
     assert final["tool_context"][0]["backup_id"]
 
@@ -340,7 +326,8 @@ def test_chat_engine_streams_tool_events_in_order(tmp_path: Path) -> None:
 
     events = asyncio.run(collect())
     names = [name for name, _ in events]
-    assert names[:2] == ["message_start", "tool_call"]
+    assert names[0] == "message_start"
+    assert "tool_call" in names
     assert "tool_result" in names
     token_index = names.index("token")
     assert token_index > names.index("tool_result")

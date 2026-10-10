@@ -13,3 +13,4 @@ minic.json
 .idea/
 .pytest-tmp/
 tmp-*
+/src.zip

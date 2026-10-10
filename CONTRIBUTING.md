@@ -12,10 +12,10 @@
 cd MiniC
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-python -m pip install -e ".[dev]"
+python -m pip install -e ".[dev,gui]"
 ```
 
-要求 Python 3.13+（开发环境为 3.14）。`pip install -e ".[dev]"` 会安装运行时依赖与 pytest 等开发依赖。
+要求 Python 3.13+（开发环境为 3.14）。`pip install -e ".[dev,gui]"` 会安装运行时依赖、桌面控件与 pytest 等开发依赖。
 
 ## 运行测试
 

@@ -24,6 +24,9 @@ class MarkdownSection:
 
 
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.*)$")
+_FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
+# Bump when Markdown section extraction changes; persisted by RagStore.
+MARKDOWN_PARSER_VERSION = "markdown-fences-v2"
 
 
 def read_text_file(path: Path) -> str:
@@ -40,17 +43,29 @@ def parse_markdown(text: str, file_path: Path) -> list[MarkdownSection]:
     heading_stack: list[tuple[int, str]] = []
     sections: list[MarkdownSection] = []
     current_lines: list[str] = []
+    fence: tuple[str, int] | None = None
 
     def flush() -> None:
         """把当前标题下的文本保存为章节。"""
-        content = "\n".join(current_lines).strip()
+        content = "\n".join(current_lines).strip("\r\n")
         current_lines.clear()
-        if not content:
+        if not content.strip():
             return
         section_name = " > ".join(heading for _, heading in heading_stack) or "文档开头"
         sections.append(MarkdownSection(title=title, section=section_name, content=content))
 
     for line in text.splitlines():
+        marker = _FENCE_RE.match(line)
+        if fence is not None:
+            current_lines.append(line)
+            if (marker and marker[1][0] == fence[0]
+                    and len(marker[1]) >= fence[1] and not marker[2].strip()):
+                fence = None
+            continue
+        if marker and (marker[1][0] != "`" or "`" not in marker[2]):
+            fence = (marker[1][0], len(marker[1]))
+            current_lines.append(line)
+            continue
         heading_match = _HEADING_RE.match(line)
         if heading_match:
             flush()

@@ -1,9 +1,9 @@
 ; MiniC 桌面端安装包（Inno Setup 6）
 ; 编译：在项目根执行  ISCC.exe packaging\MiniC.iss
-; 产物：dist\MiniC-Setup-0.0.1.exe（打包 dist\MiniC.exe，需先跑 PyInstaller）
+; 产物：dist\MiniC-Setup-<版本>.exe（版本读取 dist\MiniC.exe，需先跑 PyInstaller）
 
 #define MyAppName "MiniC"
-#define MyAppVersion "0.11"
+#define MyAppVersion GetStringFileInfo("..\dist\MiniC.exe", "ProductVersion")
 #define MyAppPublisher "MiniC"
 #define MyAppExeName "MiniC.exe"
 
@@ -16,7 +16,7 @@ DefaultDirName={autopf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 OutputDir=..\dist
-OutputBaseFilename=MiniC-Setup-0.11
+OutputBaseFilename=MiniC-Setup-{#MyAppVersion}
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern

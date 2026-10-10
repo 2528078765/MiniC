@@ -105,8 +105,9 @@ class ChatRequest(BaseModel):
 
     thread_id: str | None = None
     workspace: str | None = None
-    message: str
+    message: str = ""
     model: str | None = None
+    resume: bool = False
 
 
 class MemoryWriteRequest(BaseModel):
@@ -295,11 +296,7 @@ def create_app(
         short_memory=short_memory,
         graph=chat_graph,
         tool_runtime=tool_runtime,
-        summarize_history=lambda messages: summarize_history(  # 历史超阈值时生成摘要（只影响注入图的 history）
-            messages,  # 会话历史
-            chat_model,  # 模型
-            settings.sandbox.summarize_threshold_chars,  # 字符阈值
-        ),
+
     )
 
     app.state.rag_store = rag_store  # 单库
@@ -326,6 +323,17 @@ def create_app(
         workspace=project_root,
     )
     app.state.backup_manager = backup_manager
+
+    @app.on_event("startup")
+    async def start_checkpoints() -> None:
+        from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+        checkpoint_dir = app.state.short_memory.root_dir.parent
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        app.state.checkpoint_context = AsyncSqliteSaver.from_conn_string(str(checkpoint_dir / "checkpoints.sqlite"))
+        app.state.checkpointer = await app.state.checkpoint_context.__aenter__()
+        await app.state.checkpointer.setup()
+        chat_graph.checkpointer = app.state.checkpointer
+        subagent_manager.checkpointer = app.state.checkpointer
 
     @app.on_event("startup")
     async def start_mcp_manager() -> None:
@@ -363,6 +371,7 @@ def create_app(
                     path=str(path),
                     extensions=None,
                     source=None,
+                    refresh_processing=False,
                 )
                 entry["ingested"] = result.ingested
                 entry["skipped"] = result.skipped
@@ -381,7 +390,10 @@ def create_app(
     @app.on_event("shutdown")
     async def shutdown_mcp_manager() -> None:
         """关闭 MCP 连接、释放向量库资源并清理工具注册。"""
+        await app.state.chat_engine.close()
         await app.state.mcp_manager.shutdown()
+        if hasattr(app.state, "checkpoint_context"):
+            await app.state.checkpoint_context.__aexit__(None, None, None)
         app.state.rag_store.close()  # Milvus Lite 释放文件锁
         clear_mcp_tools()
 
@@ -471,6 +483,9 @@ def create_app(
         if "model" in payload or "rag" in payload or "embedding" in payload:
             # 热更新：重载配置并重建模型注册表（禁用/新增模型立即生效）
             app.state.settings = load_settings(app.state.project_root)
+            # RAG must use the same refreshed settings as the dynamic provider.
+            # Otherwise saved chunk parameters never reach the live indexer.
+            rag_store.settings = app.state.settings
             chat_model.update(app.state.settings)
         return Response(status_code=204)
 
@@ -589,11 +604,16 @@ def create_app(
             allowed_tools=payload.allowed_tools,
             budget=payload.budget,
         )
-        return {
-            "subagent_id": result["subagent_id"],
-            "status": result["status"],
-            "output": result["output"],
-        }
+        return result
+
+    @app.post("/agents/{subagent_id}/resume", dependencies=[Depends(_require_auth)])
+    async def resume_agent(subagent_id: str, payload: ApproveRequest) -> dict[str, Any]:
+        try:
+            return await app.state.subagent_manager.resume(subagent_id, payload.approval_id, payload.decision)
+        except KeyError as exc:
+            raise _error(404, "NOT_FOUND", str(exc)) from exc
+        except ValueError as exc:
+            raise _error(400, "VALIDATION_ERROR", str(exc)) from exc
 
     @app.get("/agents", dependencies=[Depends(_require_auth)])
     def list_agents() -> dict[str, Any]:
@@ -668,10 +688,12 @@ def create_app(
         return Response(status_code=204)
 
     @app.post("/chat/stream", dependencies=[Depends(_require_auth)])
-    def chat_stream(payload: ChatRequest) -> StreamingResponse:
+    async def chat_stream(payload: ChatRequest) -> StreamingResponse:
         """流式问答，返回 SSE 事件流；事件同时写入 sse_events.jsonl 供断线续传。"""
-        if not payload.message.strip():
+        if not payload.resume and not payload.message.strip():
             raise _error(400, "VALIDATION_ERROR", "message 不能为空")
+        if payload.model and payload.model not in chat_model.names():
+            raise _error(400, "VALIDATION_ERROR", f"模型未启用或不存在: {payload.model}")
         workspace = str((Path(payload.workspace) if payload.workspace else app.state.project_root).resolve())
         project_root = str(resolve_project_root(workspace, app.state.project_root))  # 不可写工作区回退到核心项目根
         if payload.thread_id:
@@ -684,25 +706,30 @@ def create_app(
         if thread_id in app.state.active_threads:
             raise _error(409, "CONFLICT", "该会话已有流式请求正在执行", {"thread_id": thread_id})
 
-        run_id, message_id = new_run_ids()
+        execution = await chat_engine.execution_state(thread_id, workspace)
+        resume = payload.resume or execution["resumable"]
+        if resume:
+            if not execution["resumable"]:
+                raise _error(409, "CONFLICT", "该会话没有可恢复的任务")
+            run_id, message_id = execution["run_id"], execution["message_id"]
+        else:
+            run_id, message_id = new_run_ids()
+        # 上面的检查点读取会让出事件循环；占用会话前再次检查，随后不再 await。
+        if thread_id in app.state.active_threads:
+            raise _error(409, "CONFLICT", "该会话已有流式请求正在执行", {"thread_id": thread_id})
         app.state.active_threads.add(thread_id)  # 标记会话运行中，避免并发流式请求
         app.state.run_manager.register(run_id, thread_id)  # 注册 run，供 events 续传与 cancel
 
-        # 请求级模型选择：payload.model 指定启用的模型名（未指定用默认）
-        model_token: contextvars.Token | None = None
-        if payload.model:
-            try:
-                model_token = chat_model.use(payload.model)
-            except KeyError as exc:
-                app.state.active_threads.discard(thread_id)
-                raise _error(400, "VALIDATION_ERROR", str(exc)) from exc
-
         async def event_stream() -> AsyncIterator[str]:
             """把引擎事件转成 SSE 文本并写入事件日志；取消时发送 cancelled 事件后终止。"""
-            sequence = 0
+            sequence = app.state.run_manager.event_log.last_seq(run_id)
             status: str | None = None
             message_end_sent = False
+            model_token: contextvars.Token | None = None
             try:
+                # 流在异步任务中消费，模型选择必须在此上下文设置并恢复。
+                if payload.model:
+                    model_token = chat_model.use(payload.model)
                 async for event_name, data in app.state.chat_engine.stream_chat(
                     thread_id=thread_id,
                     workspace=workspace,
@@ -710,6 +737,7 @@ def create_app(
                     message=payload.message,
                     run_id=run_id,
                     message_id=message_id,
+                    resume=resume,
                 ):
                     run_record = app.state.run_manager.get(run_id)
                     if run_record is not None and run_record["cancelled"]:
@@ -747,6 +775,7 @@ def create_app(
                     elif event_name == "done":
                         status = data.get("status")
             finally:
+                await app.state.chat_engine.cancel(run_id)
                 # 正常结束 status 为 done 的 status；取消为 cancelled；中途断开未收尾按 interrupted
                 app.state.run_manager.finish(run_id, status or "interrupted")
                 app.state.active_threads.discard(thread_id)
@@ -876,7 +905,7 @@ def create_app(
         )
 
     @app.post("/chat/stream/{run_id}/cancel", dependencies=[Depends(_require_auth)])
-    def cancel_chat_stream(run_id: str) -> Response:
+    async def cancel_chat_stream(run_id: str) -> Response:
         """取消运行中的 run：置取消标志，流式循环检测后发 message_end(cancelled)+done(cancelled) 关闭。
 
         run 不存在 -> 404；run 已结束或已取消 -> 409 CONFLICT（规格书 6.18）。
@@ -893,6 +922,7 @@ def create_app(
                 {"run_id": run_id, "status": run["status"]},
             )
         run_manager.mark_cancelled(run_id)
+        await chat_engine.cancel(run_id)
         return Response(status_code=204)
 
     @app.get("/threads", dependencies=[Depends(_require_auth)])
@@ -914,12 +944,31 @@ def create_app(
         }
 
     @app.post("/threads/{thread_id}/resume", dependencies=[Depends(_require_auth)])
-    def resume_thread(thread_id: str) -> dict[str, Any]:
+    async def resume_thread(thread_id: str) -> dict[str, Any]:
         """恢复会话并返回消息记录。"""
         thread = app.state.short_memory.load(thread_id)
         if thread is None:
             raise _error(404, "NOT_FOUND", "会话不存在", {"thread_id": thread_id})
-        return {"thread_id": thread_id, "messages": thread.get("messages", [])}
+        return {"thread_id": thread_id, "messages": thread.get("messages", []),
+                "execution": await chat_engine.execution_state(thread_id, thread["workspace"])}
+
+    @app.get("/threads/{thread_id}/execution", dependencies=[Depends(_require_auth)])
+    async def thread_execution(thread_id: str) -> dict[str, Any]:
+        thread = app.state.short_memory.load(thread_id)
+        if thread is None:
+            raise _error(404, "NOT_FOUND", "会话不存在")
+        return await chat_engine.execution_state(thread_id, thread["workspace"])
+
+    @app.get("/threads/{thread_id}/checkpoints", dependencies=[Depends(_require_auth)])
+    async def thread_checkpoints(thread_id: str) -> dict[str, Any]:
+        thread = app.state.short_memory.load(thread_id)
+        if thread is None:
+            raise _error(404, "NOT_FOUND", "会话不存在")
+        entries = []
+        async for item in chat_graph.aget_state_history(chat_engine.config(thread_id, thread["workspace"]), limit=20):
+            entries.append({"created_at": item.created_at, "next": list(item.next),
+                            "checkpoint_id": item.config["configurable"].get("checkpoint_id")})
+        return {"checkpoints": entries}
 
     @app.post("/threads/{thread_id}/compress", dependencies=[Depends(_require_auth)])
     def compress_thread(thread_id: str) -> dict[str, Any]:
@@ -1010,14 +1059,16 @@ def create_app(
         return Response(status_code=204)
 
     @app.post("/threads/{thread_id}/approve", dependencies=[Depends(_require_auth)])
-    def approve_request(thread_id: str, payload: ApproveRequest) -> Response:
+    async def approve_request(thread_id: str, payload: ApproveRequest) -> Response:
         """提交审批结果。"""
         try:
-            app.state.approval_manager.submit(
-                thread_id=thread_id,
-                approval_id=payload.approval_id,
-                decision=payload.decision,
-            )
+            if payload.approval_id in app.state.approval_manager.pending:
+                app.state.approval_manager.submit(thread_id, payload.approval_id, payload.decision)
+            else:
+                thread = app.state.short_memory.load(thread_id)
+                if thread is None:
+                    raise KeyError(thread_id)
+                await chat_engine.approve(thread_id, thread["workspace"], payload.approval_id, payload.decision)
         except KeyError as exc:
             raise _error(404, "NOT_FOUND", "审批不存在", {"approval_id": payload.approval_id}) from exc
         except ValueError as exc:

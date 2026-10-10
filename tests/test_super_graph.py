@@ -183,7 +183,8 @@ def test_super_graph_chat_action_writes_memory_and_confirms(tmp_path: Path) -> N
             },
         )
     )
-    assert final["answer"] == "好的，我记住了。"
+    assert final["answer"] == final["confirmation"]
+    assert final["answer"].startswith("已保存：")
     content = (tmp_path / "global-memory" / "minic.md").read_text(encoding="utf-8")
     assert "姓名" in content
     assert "李四" in content

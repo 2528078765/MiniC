@@ -8,7 +8,6 @@ from langchain_core.messages import HumanMessage, SystemMessage  # 消息类型
 
 from minic.graph.common import merged_memory_text, parse_model_json, is_knowledge_overview, render_document_lines, mcp_tools_text  # 记忆注入与 JSON 解析
 from minic.graph.state import ChatState  # 图状态
-from minic.middleware import retry_async  # 网络错误重试
 from minic.rag.store import RagStore  # RAG 存储
 from minic.skills import skill_inject_text  # SKILL 注入文本
 
@@ -36,9 +35,10 @@ async def route_node(  # 总图路由节点
             "把用户消息分为：knowledge（询问外部知识或知识库文档内容）、"  # 知识意图
             "chat_action（用户陈述自己的个人信息、普通聊天、指令或动作，"  # 动作意图
             "即使句末带“记住”也属于 chat_action）、"  # 个人信息仍归动作
-            "memory_query（用户询问自己的个人信息）。"  # 记忆查询意图
+            "memory_query（用户询问自己的个人信息，或询问当前项目已记录的背景、约定、偏好和长期规则）。"
             "示例：用户说“我的名字是张三”属于 chat_action；用户问“我叫什么”属于 memory_query；"  # 示例
-            "用户问“什么是 LangGraph”属于 knowledge；用户问“你都知道什么/知识库里有什么”属于 knowledge。"  # 知识示例
+            "用户问“什么是 LangGraph”属于 knowledge；用户问“你都知道什么/知识库里有什么”属于 knowledge。"
+            "根据下面长期记忆即可回答的项目约定问题属于 memory_query，不要求在知识库文档中再次出现。"
             "只输出 JSON：{\"intent\": \"...\"}"  # 输出格式
         ),  # 提示结束
         f"知识库文档清单：\n{doc_lines}",  # 注入文档清单
@@ -54,7 +54,7 @@ async def route_node(  # 总图路由节点
         SystemMessage(content="\n\n".join(system_parts)),  # 系统提示
         HumanMessage(content=state["user_message"]),  # 用户消息
     ]  # 消息结束
-    response = await retry_async(lambda: chat_model.ainvoke(messages), max_retries=2)  # 调用模型并重试网络错误
+    response = await chat_model.ainvoke(messages)  # 调用模型并重试网络错误
     try:  # 解析意图
         data = parse_model_json(response.content)  # 解析 JSON
         intent = str(data.get("intent", "knowledge"))  # 模型输出无效时默认按知识问题处理

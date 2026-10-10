@@ -144,6 +144,9 @@ class MainWindow(QMainWindow):
         self._tool_cards: dict[str, ToolCard] = {}
         self._approval_queue: list[dict[str, Any]] = []
         self._approval_dialog_open = False
+        self._approval_dialog = None
+        self._recovery_buttons: dict[str, QPushButton] = {}
+        self._closing = False
         # 侧栏项目/会话数据（项目 = 工作区，管理多个会话）
         self._projects: dict[str, list[str]] = {}
         self._project_dirs: dict[str, str] = {}  # 工作区名 → 目录路径（工具/文件落在该目录）
@@ -188,6 +191,7 @@ class MainWindow(QMainWindow):
         # 聊天 SSE 事件
         self.client.chat_event.connect(self._on_chat_event)
         self.client.chat_error.connect(self._on_chat_error)
+        self.client.chat_stream_closed.connect(self._on_transport_closed)
 
         # 加载持久化状态（工作区/会话/消息）
         self._load_state()
@@ -1002,6 +1006,7 @@ class MainWindow(QMainWindow):
         self.chat_thread_id = self._current_thread_id
         self._tool_cards.clear()
         self._approval_queue.clear()
+        self._recovery_buttons.clear()
         while self._flow_layout.count():
             item = self._flow_layout.takeAt(0)
             widget = item.widget()
@@ -1014,11 +1019,14 @@ class MainWindow(QMainWindow):
             for entry in messages:
                 if isinstance(entry, tuple) or not isinstance(entry, dict):
                     entry = {"role": entry[0], "text": entry[1], "tools": [], "sources": []}
-                bubble = MessageBubble(str(entry.get("role", "ai")), str(entry.get("text", "")))
-                self._flow_layout.addWidget(bubble)
                 tools = entry.get("tools") or []
+                activity = entry.get("activity") or {}
+                if tools or activity:
+                    self._append_replay_tool_group(tools, activity)
+                bubble = MessageBubble(str(entry.get("role", "ai")), str(entry.get("text", "")))
                 if tools:
-                    self._append_replay_tool_group(tools)
+                    bubble.set_caption("MiniC · 结果与下一步")
+                self._flow_layout.addWidget(bubble)
                 sources = entry.get("sources") or []
                 if sources:
                     self._render_sources(sources)
@@ -1033,29 +1041,106 @@ class MainWindow(QMainWindow):
         if stream is not None:
             bubble = stream["bubble"]
             self._chat_stack.setCurrentIndex(1)
-            self._flow_layout.addWidget(bubble)
-            bubble.show()
             group = stream.get("tool_group")
             if group is not None:
                 self._flow_layout.addWidget(group)
                 group.show()
+            self._flow_layout.addWidget(bubble)
+            bubble.setVisible(bool(bubble.text()))
             self._attach_input_bottom()
             self._scroll_to_bottom()
         self._toast(f"已打开会话：{sname}")
+        if self._current_thread_id and self.client.base_url:
+            worker = Worker(lambda: self.client.get_json(f"/threads/{self._session_threads.get(key)}/execution"), self)
+            worker.completed.connect(lambda data: self._show_recovery(key, data))
+            worker.start()
 
-    def _append_replay_tool_group(self, tools: list[dict[str, Any]]) -> None:
+    def _show_recovery(self, key: str, data: dict | None) -> None:
+        if key != self._current_session or not data or not data.get("resumable"):
+            return
+        old = self._recovery_buttons.pop(key, None)
+        if old is not None:
+            old.deleteLater()
+        button = QPushButton("继续任务", self._flow_container)
+        button.setToolTip("也可以直接在输入框发送“继续”或补充说明")
+        button.setStyleSheet(f"QPushButton {{ background: {COLOR_BG_ACTIVE}; color: {COLOR_ACCENT}; border: 1px solid {COLOR_ACCENT}; border-radius: 6px; padding: 8px 16px; }}")
+        self._recovery_buttons[key] = button
+        self._flow_layout.addWidget(button)
+        def proceed():
+            self._resume_native(self._session_threads.get(key, ""))
+        button.clicked.connect(proceed)
+
+    def _resume_native(self, thread_id: str, message: str = "") -> None:
+        if self._closing:
+            return
+        key = next((key for key, tid in self._session_threads.items() if tid == thread_id), None)
+        if key is None:
+            return
+        stream = self._streams.get(key)
+        if stream is not None and stream.get("transport_active"):
+            stream["resume_requested"] = True
+            stream["continuation_text"] = message or stream.get("continuation_text", "")
+            return
+        if stream is None:
+            bubble = MessageBubble("ai", "")
+            group = ToolGroup(parent=self._flow_container)
+            self._flow_layout.addWidget(group)
+            self._flow_layout.addWidget(bubble)
+            stream = {"bubble": bubble, "tool_group": group, "session": key, "saved": False,
+                      "pending_text": "", "pending_retried": True, "tool_records": [], "tool_cards": {},
+                      "sources_card": None}
+            self._streams[key] = stream
+        stream["paused"] = False
+        stream["transport_active"] = True
+        stream["resume_requested"] = False
+        message = message or stream.pop("continuation_text", "")
+        button = self._recovery_buttons.pop(key, None)
+        if button is not None:
+            button.deleteLater()
+        stream["bubble"].set_text("")
+        stream["bubble"].set_streaming(True)
+        stream["tool_group"].begin()
+        workspace = self._workspace_for_session(key)
+        model = self._current_model()
+        worker = Worker(lambda: self.client.stream_chat(thread_id, workspace, message, model, run_key=key, resume=True), self)
+        worker.start()
+
+    def _on_transport_closed(self, key: str) -> None:
+        stream = self._streams.get(key)
+        if stream is None or self._closing:
+            return
+        stream["transport_active"] = False
+        if stream.get("resume_requested"):
+            self._resume_native(self._session_threads.get(key, ""))
+        elif not stream.get("paused"):
+            self._on_chat_event("__done__", {"_run": key})
+
+    def closeEvent(self, event) -> None:
+        self._closing = True
+        self._approval_queue.clear()
+        if self._approval_dialog is not None:
+            self._approval_dialog.reject()
+        self._save_state()
+        super().closeEvent(event)
+
+    def _append_replay_tool_group(self, tools: list[dict[str, Any]], activity: dict[str, Any] | None = None) -> None:
         """重播一条消息的工具调用组（默认折叠，点组头展开）。"""
         group = ToolGroup()
         self._flow_layout.addWidget(group)
-        for record in tools:
-            card = group.add_tool(
-                tool=str(record.get("tool", "")),
-                args=record.get("args") or {},
-                status=str(record.get("status", "") or ""),
-            )
-            if record.get("output"):
-                card.set_result(str(record.get("status", "")), str(record.get("output", "")))
-        group.collapse()  # 重播默认收起一行
+        activity = activity or {}
+        items = activity.get("items") or [{"type": "tool", "index": index} for index in range(len(tools))]
+        group.begin()
+        for item in items:
+            if item.get("type") == "note":
+                group.append_commentary(str(item.get("text", "")))
+            elif item.get("type") == "tool":
+                index = item.get("index")
+                if not isinstance(index, int) or not 0 <= index < len(tools):
+                    continue
+                record = tools[index]
+                card = group.add_tool(str(record.get("tool", "")), record.get("args") or {}, str(record.get("status") or "interrupted"))
+                card.set_result(str(record.get("status") or "interrupted"), str(record.get("output", "")))
+        group.finish(str(activity.get("status") or "completed"), activity.get("elapsed"))
         group.toggled.connect(lambda: self._on_message_block_toggled())
         self._scroll_to_bottom()
 
@@ -1188,6 +1273,8 @@ class MainWindow(QMainWindow):
         for entry in models:
             if not isinstance(entry, dict):
                 continue
+            if not entry.get("enabled", True):
+                continue
             name = str(entry.get("name") or "").strip()
             if not name:
                 continue
@@ -1196,7 +1283,6 @@ class MainWindow(QMainWindow):
             self._model_combo.addItem(display)
         if not self._model_options:  # 无配置时给一个占位
             self._model_combo.addItem("（未配置模型）")
-        self._model_combo.blockSignals(False)
         # 恢复已保存的选择，否则用第一项
         saved = self._saved_model
         for index in range(self._model_combo.count()):
@@ -1204,6 +1290,8 @@ class MainWindow(QMainWindow):
             if name == saved:
                 self._model_combo.setCurrentIndex(index)
                 break
+        self._model_combo.blockSignals(False)
+        self._saved_model = self._model_options.get(self._model_combo.currentText())
 
     def _on_model_changed(self, _index: int) -> None:
         """下拉选中变化：记录选择并持久化。"""
@@ -1260,6 +1348,7 @@ class MainWindow(QMainWindow):
             else:
                 self._settings_page.discard_current()
         self._side_stack.setCurrentIndex(0)
+        self._reload_models()
         index = self._prev_stack_index if self._prev_stack_index in (0, 1) else 0
         self._chat_stack.setCurrentIndex(index)
         if index == 0:
@@ -1389,6 +1478,12 @@ class MainWindow(QMainWindow):
         self._retry_timer.stop()
         version = health.get("version", "")
         self._toast(f"核心已连接（v{version}）")
+        key = self._current_session
+        thread_id = self._current_thread_id
+        if key and thread_id:
+            worker = Worker(lambda: self.client.get_json(f"/threads/{thread_id}/execution"), self)
+            worker.completed.connect(lambda state: self._show_recovery(key, state))
+            worker.start()
 
     def _on_connection_failed(self, reason: str) -> None:
         """核心连接失败：提示一次并自动重试。"""
@@ -1447,6 +1542,13 @@ class MainWindow(QMainWindow):
 
         # 同会话已有进行中流 → 拒绝（核心同 thread 并行返回 409）
         if run_key in self._streams:
+            if self._streams[run_key].get("paused"):
+                self._flow_layout.addWidget(MessageBubble("user", text))
+                self._session_messages.setdefault(run_key, []).append({"role": "user", "text": text, "tools": [], "sources": []})
+                self._save_state()
+                self._input.clear()
+                self._resume_native(self._session_threads.get(run_key, ""), text)
+                return
             self._toast("该会话正在生成回答，请稍候")
             return
 
@@ -1467,10 +1569,12 @@ class MainWindow(QMainWindow):
         # AI 气泡 + 工具调用组 + 流记录（token 追加、message_end 归档、错误处理都按 run_key 定位）
         bubble = MessageBubble("ai", "")
         bubble.set_streaming(True)  # 输出中显示转圈，直到 message_end
-        self._flow_layout.addWidget(bubble)
-        tool_group = ToolGroup()
+        tool_group = ToolGroup(parent=self._flow_container)
         tool_group.toggled.connect(lambda: self._on_message_block_toggled())  # 展开收起自动重排布局
         self._flow_layout.addWidget(tool_group)
+        self._flow_layout.addWidget(bubble)
+        tool_group.begin()
+        bubble.hide()  # 执行过程在前，收到答复后再显示结果区。
         self._streams[run_key] = {
             "bubble": bubble,
             "tool_group": tool_group,
@@ -1479,6 +1583,7 @@ class MainWindow(QMainWindow):
             "pending_text": text,
             "pending_retried": False,
             "tool_records": [],  # 本次流累计的工具调用记录（存档用）
+            "tool_cards": {},
             "sources_card": None,  # 本次流的来源卡片（仅显示在流会话）
         }
         self._scroll_to_bottom()
@@ -1493,16 +1598,29 @@ class MainWindow(QMainWindow):
         无工作区时落在全局 ~/.minic/work（不落 MiniC 源码目录）。
         """
         self._chat_in_progress = True
+        if run_key in self._streams:
+            self._streams[run_key]["transport_active"] = True
+        button = self._recovery_buttons.pop(run_key, None)
+        if button is not None:
+            button.deleteLater()
         thread_id = self._session_threads.get(run_key) if run_key != "__welcome__" else None
-        workspace = (
-            self._project_dirs.get(self._current_project or "", None)
-            or self._default_work_dir()
-        )
+        workspace = self._workspace_for_session(run_key)
+        self._reload_models()  # 发送前同步最新配置，在 UI 线程读取控件。
+        selected_model = self._current_model()
         worker = Worker(
-            lambda: self.client.stream_chat(thread_id, workspace, text, self._current_model(), run_key=run_key),
+            lambda: self.client.stream_chat(thread_id, workspace, text, selected_model, run_key=run_key),
             self,
         )
         worker.start()
+
+    def _workspace_for_session(self, key: str) -> str:
+        """请求跟随所属会话，而非发送/恢复时碰巧选中的另一个项目。"""
+        name = key.split("::", 1)[0]
+        if name not in {"$task$", "__welcome__"}:
+            workspace = self._project_dirs.get(name)
+            if workspace:
+                return workspace
+        return self._default_work_dir()
 
     def _default_work_dir(self) -> str:
         """无工作区时的全局对话目录 ~/.minic/work（自动创建并初始化 .minic）。
@@ -1542,61 +1660,100 @@ class MainWindow(QMainWindow):
                     self._session_threads[stream["session"]] = thread_id
                     self._save_state()
         elif event_name == "token":
-            bubble.append_text(str(data.get("delta", "") or ""))
+            delta = str(data.get("delta", "") or "")
+            group = stream.get("tool_group")
+            if data.get("channel") == "activity" and group is not None:
+                group.append_commentary(delta)
+                group.set_phase("正在整理执行结果")
+                if stream["session"] != self._current_session:
+                    group.hide()
+            else:
+                bubble.append_text(delta)
+                if stream["session"] == self._current_session:
+                    bubble.show()
             self._scroll_to_bottom()
+        elif event_name == "answer":
+            answer = strip_dsml(str(data.get("text", "") or ""))
+            bubble.set_text(answer)
+            group = stream.get("tool_group")
+            if group is not None:
+                group.discard_final_commentary(answer)
+            if stream["session"] == self._current_session:
+                bubble.setVisible(bool(answer))
         elif event_name == "tool_call":
-            if stream["session"] == self._current_session:
-                self._add_tool_card(data, stream)
+            self._add_tool_card(data, stream)
         elif event_name == "tool_result":
-            if stream["session"] == self._current_session:
-                self._update_tool_result(data)
+            self._update_tool_result(data)
         elif event_name == "approval_requested":
             self._handle_approval_requested(data)
         elif event_name == "approval_result":
             self._update_approval_result(data)
+        elif event_name == "graph_step":
+            names = {"route": "已判断请求类型", "rewrite_query": "已整理检索问题", "retrieve": "已完成知识库检索",
+                     "extract_memory": "已检查长期记忆", "agent": "已生成本轮处理结果", "tools": "已完成本轮工具操作"}
+            group = stream.get("tool_group")
+            if group is not None and data.get("node") in names:
+                group.set_phase(names[data["node"]])
+        elif event_name == "graph_progress":
+            group = stream.get("tool_group")
+            progress = data.get("progress") or {}
+            if group is not None and isinstance(progress, dict) and progress.get("message"):
+                group.set_phase(str(progress["message"]))
         elif event_name == "message_end":
-            # AI 完整文本 + 工具记录存档到发起该流的会话（切换后仍正确归属）
-            if stream["session"] is not None:
-                self._session_messages.setdefault(stream["session"], []).append(
-                    {
-                        "role": "ai",
-                        "text": bubble.text(),
-                        "tools": list(stream.get("tool_records", [])),
-                        "sources": [],
-                    }
-                )
-                stream["saved"] = True
-                self._save_state()
             # 双保险：用过滤后的最终文本替换气泡（防任何工具标记残留显示）
             bubble.set_text(strip_dsml(bubble.text()))
             # 回答完成：停转圈 + 收起该流的工具调用组（可点组头展开）
             bubble.set_streaming(False)
             group = stream.get("tool_group")
             if group is not None:
-                group.collapse()
+                group.finish(str(data.get("status") or "completed"))
+            self._save_stream_message(stream)
         elif event_name == "done":
+            if data.get("status") == "waiting_approval":
+                stream["paused"] = True
+                bubble.set_text("任务已暂停，等待你确认工具操作。确认后将继续；重启后也可以恢复。")
+                bubble.set_streaming(False)
+                bubble.show()
+                self._save_stream_message(stream)
+                self._show_recovery(run_key, {"resumable": True})
+                return
             sources = data.get("sources") or []
-            # 来源回填到会话存档（最后一条 AI 消息）
-            if stream["session"] is not None:
-                messages = self._session_messages.setdefault(stream["session"], [])
-                if messages and messages[-1].get("role") == "ai":
-                    messages[-1]["sources"] = list(sources)
-                self._save_state()
+            if not bubble.text():
+                status = data.get("status")
+                bubble.set_text("本次任务已取消。" if status == "cancelled" else "本次处理已中断。" if status == "interrupted" else "处理已结束，但没有收到模型的答复。")
+                if stream["session"] == self._current_session:
+                    bubble.show()
+            group = stream.get("tool_group")
+            if group is not None:
+                group.finish(str(data.get("status") or "completed"))
+            self._save_stream_message(stream, sources)
             if stream["session"] == self._current_session:
                 self._render_sources(sources, stream)
             bubble.set_streaming(False)
             self._finish_chat(run_key)
         elif event_name == "error":
-            self._toast(f"核心错误：{data.get('message', '')}")
-            bubble.set_streaming(False)
-            self._finish_chat(run_key)
+            self._on_chat_error(str(data.get("message") or "核心服务返回未知错误"), run_key)
         elif event_name == "__done__":
+            if stream.get("paused"):
+                return
             bubble.set_streaming(False)
+            group = stream.get("tool_group")
+            if group is not None and group._status == "running":
+                group.finish("interrupted")
+                partial = bubble.text()
+                notice = "连接已中断，本次处理未完成。发送“继续”或补充说明，可以接着本次任务处理。"
+                bubble.set_text(f"{partial}\n\n{notice}" if partial else notice)
+                if stream["session"] == self._current_session:
+                    bubble.show()
+                self._save_stream_message(stream)
             self._finish_chat(run_key)
 
     def _add_tool_card(self, data: dict[str, Any], stream: dict[str, Any]) -> None:
         """往该流的工具调用组加入一步，并记录到流（存档/重播用）。"""
         tool_call_id = str(data.get("id", ""))
+        if tool_call_id in stream.get("tool_cards", {}):
+            stream["tool_cards"][tool_call_id].mark_running()
+            return
         group = stream["tool_group"]
         card = group.add_tool(
             tool=str(data.get("tool", "")),
@@ -1604,6 +1761,8 @@ class MainWindow(QMainWindow):
             status=str(data.get("status", "pending")),
         )
         self._tool_cards[tool_call_id] = card
+        stream.setdefault("tool_cards", {})[tool_call_id] = card
+        stream["bubble"].set_caption("MiniC · 结果与下一步")
         stream.setdefault("tool_records", []).append(
             {
                 "id": tool_call_id,
@@ -1613,12 +1772,43 @@ class MainWindow(QMainWindow):
                 "output": "",
             }
         )
+        if stream["session"] != self._current_session:
+            group.hide()
         self._scroll_to_bottom()
+
+    def _save_stream_message(self, stream: dict[str, Any], sources: list[dict[str, Any]] | None = None) -> None:
+        """保存当前回复本身，避免并发会话把来源与过程写到其他回复。"""
+        if stream["session"] is None:
+            return
+        group = stream.get("tool_group")
+        records = stream.get("tool_records", [])
+        if group is not None:
+            for record, card in zip(records, group._steps):
+                record["status"] = card.status
+        entry = stream.get("saved_entry")
+        if entry is None:
+            entry = {"role": "ai", "text": "", "tools": [], "sources": []}
+            self._session_messages.setdefault(stream["session"], []).append(entry)
+            stream["saved_entry"] = entry
+        entry.update(text=stream["bubble"].text(), tools=list(records))
+        if group is not None:
+            entry["activity"] = group.snapshot()
+        if sources is not None:
+            entry["sources"] = list(sources)
+        stream["saved"] = True
+        self._save_state()
+
+    def _find_tool_card(self, tool_call_id: str) -> ToolCard | None:
+        for stream in self._streams.values():
+            card = stream.get("tool_cards", {}).get(tool_call_id)
+            if card is not None:
+                return card
+        return self._tool_cards.get(tool_call_id)
 
     def _update_tool_result(self, data: dict[str, Any]) -> None:
         """更新工具卡片结果，并同步记录（输出截断保存，防状态文件膨胀）。"""
         tool_call_id = str(data.get("id", ""))
-        card = self._tool_cards.get(tool_call_id)
+        card = self._find_tool_card(tool_call_id)
         result = str(data.get("output", "") or "")
         if card is not None:
             card.set_result(str(data.get("status", "")), result)
@@ -1633,9 +1823,15 @@ class MainWindow(QMainWindow):
 
     def _handle_approval_requested(self, data: dict[str, Any]) -> None:
         """审批弹窗；对应工具卡片标记「需审批」。"""
-        card = self._tool_cards.get(str(data.get("tool_call_id", "")))
+        card = self._find_tool_card(str(data.get("tool_call_id", "")))
         if card is not None:
             card.mark_awaiting()
+        if self._closing:
+            return
+        approval_id = str(data.get("id", ""))
+        if (self._approval_dialog is not None and self._approval_dialog.property("approval_id") == approval_id
+                or any(item.get("id") == approval_id for item in self._approval_queue)):
+            return
         self._approval_queue.append(dict(data))
         if not self._approval_dialog_open:
             self._process_approval_queue()
@@ -1652,14 +1848,19 @@ class MainWindow(QMainWindow):
             message=item.get("message"),
             options=item.get("options"),
             parent=self,
+            workspace=item.get("project_root"),
         )
+        self._approval_dialog = dialog
+        dialog.setProperty("approval_id", str(item.get("id", "")))
         thread_id = str(item.get("thread_id", self.chat_thread_id or ""))
 
         def _on_done(decision: str | None) -> None:
             self._approval_dialog_open = False
+            self._approval_dialog = None
             if decision is not None and self.client.base_url is not None:
                 self._submit_approval(thread_id, str(item.get("id", "")), decision)
-            self._process_approval_queue()
+            if not self._closing:
+                self._process_approval_queue()
 
         dialog.finished.connect(
             lambda _result: _on_done(dialog.decision)
@@ -1672,15 +1873,25 @@ class MainWindow(QMainWindow):
             lambda: self.client.approve(thread_id, approval_id, decision),
             self,
         )
-        worker.completed.connect(lambda ok: self._notify(f"已提交审批：{decision}", "success") if ok else self._notify("审批提交失败", "failed"))
+        def approved(ok):
+            if ok:
+                self._notify(f"已提交审批：{decision}", "success")
+                # /tools/run 的旧单工具 API 仍在流内等待；聊天审批保存后开启恢复流。
+                self._resume_native(thread_id)
+            else:
+                self._notify("审批提交失败", "failed")
+        worker.completed.connect(approved)
         worker.failed.connect(lambda err: self._notify(f"审批提交失败：{err}", "failed"))
         worker.start()
 
     def _update_approval_result(self, data: dict[str, Any]) -> None:
         """审批结果回执；对应工具卡片恢复「执行中」（超时除外）。"""
-        card = self._tool_cards.get(str(data.get("tool_call_id", "")))
-        if card is not None and data.get("status") != "expired":
-            card.mark_running()
+        card = self._find_tool_card(str(data.get("tool_call_id", "")))
+        if card is not None:
+            if data.get("status") == "approved":
+                card.mark_running()
+            else:
+                card.set_result(str(data.get("status") or "interrupted"))
         self._toast(f"审批结果：{data.get('status', '')}")
 
     def _render_sources(self, sources: list[dict[str, Any]], stream: dict[str, Any] | None = None) -> None:
@@ -1705,6 +1916,9 @@ class MainWindow(QMainWindow):
         self._chat_in_progress = bool(self._streams)
         if stream is None:
             return
+        group = stream.get("tool_group")
+        if group is not None and group._status == "running":
+            group.finish("interrupted")
         bubble = stream["bubble"]
         if self._flow_layout.indexOf(bubble) == -1:
             bubble.deleteLater()
@@ -1739,15 +1953,17 @@ class MainWindow(QMainWindow):
             self._save_state()
             self._fire_chat(stream["pending_text"], run_key)
             return
-        if (
-            not stream["saved"]
-            and stream["session"] is not None
-            and stream["bubble"].text()
-        ):
-            self._session_messages.setdefault(stream["session"], []).append(
-                ("ai", stream["bubble"].text())
-            )
-            self._save_state()
+        bubble = stream["bubble"]
+        bubble.set_streaming(False)
+        partial = bubble.text()
+        error_text = f"聊天失败：{message}"
+        bubble.set_text(f"{partial}\n\n{error_text}" if partial else error_text)
+        if stream["session"] == self._current_session:
+            bubble.show()
+        group = stream.get("tool_group")
+        if group is not None:
+            group.finish("failed")
+        self._save_stream_message(stream)
         self._notify(f"聊天失败：{message}", "failed")
         self._finish_chat(run_key)
 

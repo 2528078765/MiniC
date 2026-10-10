@@ -61,7 +61,7 @@ class FakeSummarizeModel(BaseChatModel):
             return "[]"
         if "可用工具" in system:
             human_text = "".join(str(m.content) for m in messages if isinstance(m, HumanMessage))
-            return "摘要回答。" if "历史摘要" in human_text else "普通回答。"
+            return "摘要回答。" if "历史摘要" in human_text or any("会话摘要" in str(message.content) for message in messages) else "普通回答。"
         if "总结" in system:
             return self.summary
         return "ok"
@@ -119,7 +119,7 @@ class FakeSummarizeModel(BaseChatModel):
         if content != "ok":
             return [content]
         human_text = "".join(str(m.content) for m in messages if isinstance(m, HumanMessage))
-        return ["摘要回答。"] if "历史摘要" in human_text else ["普通回答。"]
+        return ["摘要回答。"] if "历史摘要" in human_text or any("会话摘要" in str(message.content) for message in messages) else ["普通回答。"]
 
 
 def _parse_sse(text: str) -> list[tuple[str, dict]]:
@@ -223,6 +223,7 @@ def _build_engine(tmp_path: Path, model: FakeSummarizeModel, threshold: int):
     )
     memory_store = LongTermMemoryStore(tmp_path / "global-memory", tmp_path)
     rag_store = RagStore(tmp_path / "rag-data", settings, MockEmbeddingProvider(64))
+    settings.sandbox.summarize_threshold_chars = threshold
     graph = build_super_graph(rag_store, model, memory_store, settings)
     short_memory = ShortMemoryStore(tmp_path / "memory" / "short_memory")
     thread_id = "sum-1"
@@ -260,9 +261,10 @@ def test_engine_over_threshold_summarizes_into_answer(tmp_path: Path) -> None:
     events = asyncio.run(_collect(engine, thread_id, tmp_path))
 
     assert "摘要回答。" in _token_text(events)
-    summarize_msgs = [msgs for msgs in model.invoke_captured if "总结以下对话" in msgs[0].content]
-    assert summarize_msgs, "超阈值时应调用摘要模型"
-    assert "第 15 条历史消息" in summarize_msgs[0][1].content
+    # 原生 trim_messages 限制模型上下文，完整消息保留在检查点。
+    answer_messages = model.stream_captured[-1]
+    assert len("".join(str(message.content) for message in answer_messages[1:])) <= 100
+    assert any(message.type == "human" for message in answer_messages)
 
 
 def test_engine_under_threshold_does_not_summarize(tmp_path: Path) -> None:

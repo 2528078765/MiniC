@@ -29,6 +29,7 @@ from minic.gui.theme import (
     COLOR_RED,
     COLOR_SHIELD,
     COLOR_TEXT_MUTED,
+    COLOR_TEXT_PRIMARY,
     COLOR_TEXT_SECONDARY,
 )
 
@@ -221,10 +222,12 @@ class ApprovalDialog(MiniDialog):
         message: str | None = None,
         options: list[str] | None = None,
         parent: QWidget | None = None,
+        workspace: str | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("工具审批")
-        self.setModal(True)
+        self.setModal(False)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         self.setMinimumWidth(420)
         self.decision: str | None = None
 
@@ -236,12 +239,39 @@ class ApprovalDialog(MiniDialog):
         title.setStyleSheet(
             f"color: {COLOR_SHIELD}; font-size: 15px; font-weight: 600; background: transparent; border: none;"
         )
-        root.addWidget(title)
+        heading = QHBoxLayout()
+        heading.addWidget(title)
+        heading.addStretch()
+        close_button = QPushButton(self)
+        close_button.setObjectName("approvalClose")
+        close_button.setIcon(load_icon("关闭", color=COLOR_TEXT_PRIMARY))
+        close_button.setIconSize(QtCore.QSize(22, 22))
+        close_button.setAccessibleName("暂时关闭审批窗口")
+        close_button.setToolTip("暂时关闭，保留待审批操作")
+        close_button.setFixedSize(32, 32)
+        close_button.setStyleSheet(
+            f"QPushButton#approvalClose {{ background: {COLOR_BG_CARD};"
+            f"border: 1px solid {COLOR_BORDER}; border-radius: 6px; padding: 0; }}"
+            f"QPushButton#approvalClose:hover {{ background: {COLOR_RED}; }}"
+            f"QPushButton#approvalClose:pressed {{ background: #a30f1a; }}"
+            f"QPushButton#approvalClose:focus {{ border-color: {COLOR_ACCENT}; }}"
+        )
+        close_button.setAutoDefault(False)
+        close_button.clicked.connect(self.reject)
+        heading.addWidget(close_button)
+        root.addLayout(heading)
 
         tool_label = QLabel(f"工具：<b>{tool}</b>", self)
         tool_label.setTextFormat(Qt.TextFormat.RichText)
         tool_label.setStyleSheet(f"color: {COLOR_TEXT_SECONDARY}; background: transparent; border: none;")
         root.addWidget(tool_label)
+
+        if workspace:
+            folder = QLabel(f"执行目录：{workspace}", self)
+            folder.setTextFormat(Qt.TextFormat.PlainText)
+            folder.setWordWrap(True)
+            folder.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            root.addWidget(folder)
 
         args_box = QLabel(_fmt_args(args), self)
         args_box.setTextFormat(Qt.TextFormat.PlainText)
@@ -262,7 +292,7 @@ class ApprovalDialog(MiniDialog):
             )
             root.addWidget(msg_label)
 
-        hint = QLabel("本地核心将执行此操作，请确认是否符合预期。", self)
+        hint = QLabel("允许后会直接继续。关闭此窗口仅暂缓审批，可稍后发送“继续”。", self)
         hint.setStyleSheet(
             f"color: {COLOR_TEXT_MUTED}; background: transparent; border: none; font-size: 11px;"
         )

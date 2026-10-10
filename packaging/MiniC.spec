@@ -8,6 +8,10 @@
 注意：spec 中的相对路径以 spec 所在目录为基准，统一用 SPECPATH 换算项目根。
 """
 
+import os
+import sys
+from pathlib import Path
+
 from PyInstaller.utils.hooks import collect_all, collect_submodules
 
 ROOT = __import__("pathlib").Path(SPECPATH).parent  # noqa: F821 - PyInstaller 注入 SPECPATH
@@ -23,6 +27,9 @@ for package in (
     "langchain_openai",
     "langchain_deepseek",
     "langgraph",
+    "langgraph.checkpoint.sqlite",
+    "aiosqlite",
+    "sqlite_vec",
     "langgraph_checkpoint",
     "langgraph_prebuilt",
     "langgraph_sdk",
@@ -58,18 +65,33 @@ for package in (
 
 hiddenimports += collect_submodules("minic")
 
-a = Analysis(
-    [str(ROOT / "src" / "minic" / "gui" / "app.py")],
-    pathex=[str(ROOT / "src")],
-    binaries=binaries,
-    datas=datas,
-    hiddenimports=hiddenimports,
-    hookspath=[],
-    hooksconfig={},
-    runtime_hooks=[],
-    excludes=["tkinter"],
-    noarchive=False,
-)
+# Windows 的 DLL 查找会使用 PATH。其他软件的同名 ICU/OpenSSL DLL
+# 可能覆盖 Qt 所需的系统库，因此分析时只保留 Python 和 Windows 目录。
+# 第三方包自身的 DLL 目录仍由对应的 PyInstaller hook 负责发现。
+original_path = os.environ.get("PATH", "")
+if sys.platform == "win32":
+    system_root = Path(os.environ["SystemRoot"])
+    os.environ["PATH"] = os.pathsep.join(dict.fromkeys([
+        str(Path(sys.executable).parent),
+        str(Path(sys.base_prefix)),
+        str(system_root / "System32"),
+        str(system_root),
+    ]))
+try:
+    a = Analysis(
+        [str(ROOT / "src" / "minic" / "gui" / "app.py")],
+        pathex=[str(ROOT / "src")],
+        binaries=binaries,
+        datas=datas,
+        hiddenimports=hiddenimports,
+        hookspath=[],
+        hooksconfig={},
+        runtime_hooks=[],
+        excludes=["tkinter"],
+        noarchive=False,
+    )
+finally:
+    os.environ["PATH"] = original_path
 pyz = PYZ(a.pure)
 
 exe = EXE(

@@ -2,13 +2,14 @@
 
 from __future__ import annotations  # 延迟注解求值
 
+import asyncio
+from langchain_core.messages import AIMessage
 from typing import Any  # 任意类型
 
 from langchain_core.messages import HumanMessage, SystemMessage  # 消息类型
 
-from minic.graph.common import merged_memory_text, stream_answer, is_knowledge_overview, append_documents_block, append_mcp_block, render_document_lines  # 记忆注入与流式回答
+from minic.graph.common import response_messages, model_messages, merged_memory_text, stream_answer, is_knowledge_overview, append_documents_block, append_mcp_block, render_document_lines  # 记忆注入与流式回答
 from minic.graph.state import ChatState  # 图状态
-from minic.middleware import retry_async  # 网络错误重试
 from minic.rag.store import RagStore  # RAG 存储
 from minic.skills import skill_inject_text  # SKILL 注入文本
 
@@ -37,7 +38,7 @@ async def rewrite_query_node(  # 改写检索问题
             for message in history[-8:]  # 最多取最近 8 条
         ],  # 历史结束
     ]  # 消息结束
-    response = await retry_async(lambda: chat_model.ainvoke(messages), max_retries=2)  # 调用模型并重试
+    response = await chat_model.ainvoke(messages)  # 调用模型并重试
     rewritten = response.content.strip()  # 清理改写结果
     return {"rewritten_query": rewritten or user_message}  # 改写为空时回退原始问题
 
@@ -50,7 +51,7 @@ async def retrieve_node(  # 混合检索
     if is_knowledge_overview(state["user_message"]):  # 概况类问题（"你都知道什么"）不做检索
         return {"contexts": [], "sources": []}  # 由回答节点直接给出文档清单
     top_k = rag_store.settings.rag.top_k  # 读取配置的返回条数
-    results = rag_store.query(  # 混合检索（向量 + BM25）
+    results = await asyncio.to_thread(rag_store.query,  # 混合检索（向量 + BM25）
         state["rewritten_query"],  # 使用改写后的查询
         top_k=top_k,  # 读取配置的返回条数
     )  # 查询结束
@@ -94,14 +95,11 @@ async def knowledge_answer_node(  # 知识库回答节点
             for index, context in enumerate(contexts)  # 编号资料
         )  # 资料结束
         parts = [  # 系统提示片段
-            "你是 MiniC 知识助手。请只依据下面的资料回答，不要编造。",  # 角色约束
+            "你是 MiniC 知识助手。请依据提供的长期记忆、对话历史和检索资料回答，不要编造。"
+            "当前项目的背景、约定、偏好与长期规则可以直接依据项目 Agent.md 回答，不要求它们同时出现在检索资料中。",
             "直接输出纯文本答案，不要使用 JSON 包装，不要输出代码块。",  # 输出约束
             "回答时可用 [编号] 标注引用来源（如 [1]、[2]）。",  # 引用标注
         ]  # 提示结束
-        if memory_text:  # 有长期记忆
-            parts.append(f"长期记忆：\n{memory_text}")  # 注入记忆
-        if skill_text:  # 有启用的 SKILL
-            parts.append(f"当前启用的 SKILL 能力：\n{skill_text}")  # 注入 SKILL 描述
         parts.append(f"资料：\n{context_block}")  # 注入资料
         system_text = "\n\n".join(parts)  # 组合系统提示
         system_text = append_documents_block(system_text, documents)  # 常驻文档清单（概况类改述也能按清单回答）
@@ -116,9 +114,17 @@ async def knowledge_answer_node(  # 知识库回答节点
         else:  # 空库
             system_text = "你是 MiniC 知识助手。知识库中暂无文档。不要使用 JSON 包装。"  # 明确告知空库
     else:  # 检索无结果
-        system_text = "你是 MiniC 知识助手。没有检索到相关资料，请直接回复：未检索到。不要使用 JSON 包装。"  # 无资料时明确回答未检索到
-        if skill_text:  # 有启用的 SKILL
-            system_text += f"\n\n当前启用的 SKILL 能力：\n{skill_text}"  # 注入 SKILL 描述
+        system_text = (
+            "你是 MiniC 知识助手。没有检索到相关知识库资料。仍应依据提供的长期记忆和对话历史回答："
+            "它们能直接回答时据此作答，否则说明未检索到足够依据，不要编造。不要使用 JSON 包装。"
+        )
+    # 路由判为知识问题也不能丢失项目记忆；空检索、概况和有资料的路径使用同一上下文。
+    if memory_text:
+        system_text += (f"\n\n长期记忆：\n{memory_text}\n"
+                        "项目 Agent.md 是当前项目记忆。引用记忆时说明来自项目约定，"
+                        "不要给它编造检索资料的 [编号]，也不要把它当成已入库文档。")
+    if skill_text:
+        system_text += f"\n\n当前启用的 SKILL 能力：\n{skill_text}"
     system_text = append_mcp_block(system_text)  # 常驻已连接 MCP 工具清单（问 MCP 能力时按真实连接回答）
-    answer = await stream_answer(chat_model, system_text, state.get("history", []), state["user_message"])  # 流式生成回答
-    return {"answer": answer}  # 返回回答
+    answer = await stream_answer(chat_model, system_text, state.get("history", []), state["user_message"], native_messages=model_messages(state, settings))  # 流式生成回答
+    return {"messages": response_messages(state, [AIMessage(content=answer)]), "answer": answer}  # 返回回答

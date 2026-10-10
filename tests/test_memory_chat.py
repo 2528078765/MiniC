@@ -89,11 +89,12 @@ def test_user_info_written_to_global_memory(tmp_path: Path) -> None:
             },
         )
     )
-    assert final["answer"] == "好的，我记住了。"
+    assert final["answer"] == final["confirmation"]
+    assert final["answer"].startswith("已保存：")
     content = (tmp_path / "global-memory" / "minic.md").read_text(encoding="utf-8")
     assert "姓名" in content
     assert "张三" in content
-    assert not (tmp_path / ".minic" / "memory" / "minic.md").exists()
+    assert not (tmp_path / "Agent.md").exists()
 
 
 def test_general_personal_info_extraction(tmp_path: Path) -> None:
@@ -177,7 +178,7 @@ def test_knowledge_question_still_uses_rag(tmp_path: Path) -> None:
     )
     assert "未检索到。" in final["answer"]
     assert not (tmp_path / "global-memory" / "minic.md").exists()
-    assert not (tmp_path / ".minic" / "memory" / "minic.md").exists()
+    assert not (tmp_path / "Agent.md").exists()
 
 
 def test_memory_writes_global_when_workspace_unwritable(tmp_path: Path) -> None:
@@ -201,7 +202,8 @@ def test_memory_writes_global_when_workspace_unwritable(tmp_path: Path) -> None:
             },
         )
     )
-    assert final["answer"] == "好的，我记住了。"
+    assert final["answer"] == final["confirmation"]
+    assert final["answer"].startswith("已保存：")
     content = (tmp_path / "global-memory" / "minic.md").read_text(encoding="utf-8")
     assert "姓名" in content
     assert "王五" in content
@@ -228,8 +230,9 @@ def test_project_info_written_to_project_memory(tmp_path: Path) -> None:
             },
         )
     )
-    assert final["answer"] == "好的，我记住了。"
-    content = (tmp_path / ".minic" / "memory" / "minic.md").read_text(encoding="utf-8")
+    assert final["answer"] == final["confirmation"]
+    assert final["answer"].startswith("已保存：")
+    content = (tmp_path / "Agent.md").read_text(encoding="utf-8")
     assert "项目约定" in content
     assert "Python" in content
     assert not (tmp_path / "global-memory" / "minic.md").exists()
@@ -244,7 +247,7 @@ def test_migrate_project_to_global_is_generic_and_idempotent(tmp_path: Path) -> 
     first = memory_store.migrate_project_to_global(classify_scope, str(tmp_path))
     assert [item["topic"] for item in first] == ["姓名"]
     global_content = (tmp_path / "global-memory" / "minic.md").read_text(encoding="utf-8")
-    project_content = (tmp_path / ".minic" / "memory" / "minic.md").read_text(encoding="utf-8")
+    project_content = (tmp_path / "Agent.md").read_text(encoding="utf-8")
     assert "姓名" in global_content
     assert "张三" in global_content
     assert "项目约定" in project_content

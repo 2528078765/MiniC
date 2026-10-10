@@ -4,6 +4,8 @@ from __future__ import annotations  # 延迟注解求值
 
 from typing import Any  # 任意类型
 
+from langgraph.types import RetryPolicy, TimeoutPolicy
+from minic.graph.policies import READ_RETRY
 from langgraph.graph import END, StateGraph  # LangGraph 图组件
 
 from minic.graph.knowledge.knowledge_node import (  # 导入节点逻辑
@@ -37,9 +39,9 @@ def build_knowledge_graph(  # 构建知识库子图
         return await knowledge_answer_node(state, chat_model, memory_store, settings, skill_manager, rag_store)  # 绑定依赖后调用回答逻辑
 
     builder = StateGraph(ChatState)  # 创建子图构建器
-    builder.add_node("rewrite_query", rewrite_node)  # 注册改写节点
-    builder.add_node("retrieve", retrieve_node_call)  # 注册检索节点
-    builder.add_node("answer", answer_node_call)  # 注册回答节点
+    builder.add_node("rewrite_query", rewrite_node, timeout=TimeoutPolicy(run_timeout=180), retry_policy=READ_RETRY)  # 注册改写节点
+    builder.add_node("retrieve", retrieve_node_call, timeout=TimeoutPolicy(run_timeout=180), retry_policy=READ_RETRY)  # 注册检索节点
+    builder.add_node("answer", answer_node_call, timeout=TimeoutPolicy(run_timeout=180))  # 注册回答节点
     builder.set_entry_point("rewrite_query")  # 设置入口节点
     builder.add_edge("rewrite_query", "retrieve")  # 改写后进入检索
     builder.add_edge("retrieve", "answer")  # 检索后进入回答

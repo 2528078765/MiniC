@@ -4,6 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+import copy
+import os
+from pathlib import Path
+from langgraph.types import interrupt
+from langgraph.errors import GraphBubbleUp
 from datetime import datetime
 from typing import Any, Callable
 
@@ -66,7 +71,7 @@ class ToolRuntime:
             server_name, tool_name = tool.split(".", 1)
             output = await self.mcp_manager.call_tool(server_name, tool_name, args)
             return ToolResult(status="success", output=output)
-        return self.tool_executor.execute(tool, args, project_root=project_root)
+        return await asyncio.to_thread(self.tool_executor.execute, tool, args, project_root=project_root)
 
     def _ingest_path(self, args: dict[str, Any]) -> str | None:
         """返回 IngestDirectory 的目标目录：args.path 优先，缺省用 rag.default_directory。"""
@@ -162,7 +167,7 @@ class ToolRuntime:
         """按 run_id + tool_call_id 查找已完成结果。"""
         if not run_id or not tool_call_id:
             return None
-        for record in self.tool_log.read():
+        for record in reversed(self.tool_log.read()):
             if (
                 record.get("event") == "result"
                 and record.get("run_id") == run_id
@@ -197,6 +202,7 @@ class ToolRuntime:
                 "idempotency_key": idempotency_key,
                 "status": status,
                 "output": output,
+                "backup_id": backup_id,
                 "timestamp": datetime.now().astimezone().isoformat(),
             }
         )
@@ -209,6 +215,166 @@ class ToolRuntime:
             data["backup_id"] = backup_id
         sink("tool_result", data)
 
+    async def _native_bash(self, args: dict, project_root: str) -> ToolResult:
+        """命令取消或超时时终止进程树，再等待退出。"""
+        from minic.middleware import redact_pii
+        flags = {"creationflags": 0x08000000} if os.name == "nt" else {}
+        creation = asyncio.create_task(asyncio.create_subprocess_shell(
+            str(args.get("command", "")), cwd=project_root,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, **flags,
+        ))
+        async def stop(process):
+            if process.returncode is None:
+                if os.name == "nt":
+                    killer = await asyncio.create_subprocess_exec("taskkill", "/PID", str(process.pid), "/T", "/F",
+                        stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL, **flags)
+                    await killer.wait()
+                else:
+                    process.kill()
+            await process.wait()
+        async def finish_cleanup(awaitable):
+            # 父图和 ToolNode 都可能传递取消；清理任务必须等完而不能再次被取消。
+            cleanup = asyncio.ensure_future(awaitable)
+            while not cleanup.done():
+                try:
+                    await asyncio.shield(cleanup)
+                except asyncio.CancelledError:
+                    continue
+            return cleanup.result()
+        try:
+            process = await asyncio.shield(creation)
+        except asyncio.CancelledError:
+            # 创建进程期间取消也要拿到句柄并关闭，不能遗留后台命令。
+            process = await finish_cleanup(creation)
+            await finish_cleanup(stop(process))
+            raise
+        try:
+            output, _ = await asyncio.wait_for(process.communicate(), self.tool_executor.command_timeout)
+            return ToolResult("success" if process.returncode == 0 else "failed",
+                              redact_pii(output.decode(errors="replace")))
+        except (asyncio.CancelledError, asyncio.TimeoutError):
+            await finish_cleanup(stop(process))
+            raise
+
+    async def _execute_native(self, thread_id, run_id, tool, args, tool_call_id, emit, subagent_id, project_root):
+        sink = self._sink(thread_id, emit)
+        call_id = tool_call_id or str(uuid.uuid4())
+        if subagent_id:
+            call_id = f"{subagent_id}:{call_id}"
+        key = ToolExecutionLog.idempotency_key(thread_id, tool, args)
+        manager = copy.copy(self.approval_manager)
+        manager.workspace = Path(project_root or manager.workspace).resolve()
+        # 相对路径的授权和实际执行必须使用同一项目目录。
+        args = dict(args)
+        if args.get("path"):
+            path = Path(str(args["path"])).expanduser()
+            args["path"] = str((manager.workspace / path).resolve() if not path.is_absolute() else path.resolve())
+        sink("tool_call", {"id": call_id, "tool": tool, "args": args, "status": "pending", "subagent_id": subagent_id})
+        existing = self._existing_result(run_id, call_id)
+        if existing and existing.get("status") != "interrupted":
+            sink("tool_result", {"id": call_id, "status": existing["status"], "output": existing.get("output"), "backup_id": existing.get("backup_id")})
+            return {**existing, "tool_call_id": call_id}
+        restriction = self._skill_restriction(tool)
+        if self.sandbox_policy is not None:
+            restriction = self.sandbox_policy.check_tool(tool, args, manager.workspace) or restriction
+        from langgraph.func import task
+        # 规划和授权各自成为持久化任务，恢复时不会因为权限文件变化而改变中断顺序。
+        @task(name="plan_tool_access")
+        async def plan_access():
+            return manager.plan(tool, args, thread_id)
+        plan = "deny" if restriction else await plan_access()
+        intents = [r for r in self.tool_log.read() if r.get("event") == "intent"
+                   and r.get("run_id") == run_id and r.get("tool_call_id") == call_id]
+        unknown = bool(existing and existing.get("status") == "interrupted") or bool(intents)
+        from minic.graph.tools import get_tool
+        spec = get_tool(tool)
+        options = (["allow_once", "deny"] if tool == "Bash" else
+                   ["allow_once", "allow_always", "deny"] if tool == "IngestDirectory" else
+                   ["allow_once", "allow_session", "allow_always", "deny"])
+        payload = {"id": str(uuid.uuid5(uuid.NAMESPACE_URL, f"{run_id}:{call_id}")),
+                   "thread_id": thread_id, "run_id": run_id, "tool_call_id": call_id,
+                   "subagent_id": subagent_id, "tool": tool, "args": args, "options": options,
+                   "project_root": str(manager.workspace)}
+        @task(name="approve_tool_access")
+        async def approval_choice(data):
+            sink("approval_requested", data)
+            choice = interrupt(data)
+            if choice not in data["options"]:
+                raise ValueError("无效审批决定")
+            return choice
+        if plan == "approval":
+            decision = await approval_choice(payload)
+            if decision == "allow_always":
+                if manager.permission_store.check(tool, args, manager.workspace) != "allow_always":
+                    manager.permission_store.grant("project", manager.workspace, tool, manager._pattern(tool, args), decision)
+            if decision == "allow_session":
+                manager.session_allows.setdefault(thread_id, set()).add(manager._pattern(tool, args))
+            sink("approval_result", {"id": payload["id"], "tool_call_id": call_id,
+                                     "status": "denied" if decision == "deny" else "approved", "decision": decision})
+            if decision == "deny":
+                plan = "deny"
+        if unknown and plan != "deny" and spec and spec.category != "read" and tool != "DelegateToSubagent":
+            # 已批准一次并不代表允许重做；每次不确定执行都必须获得一个新确认。
+            record = existing or intents[-1]
+            marker = str(record.get("timestamp") or len(intents))
+            suffix = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{run_id}:{call_id}:{marker}:recovery"))
+            recovery = {**payload, "id": suffix, "options": ["allow_once", "deny"],
+                        "message": "上次执行中断，结果尚未确认。选择允许将重新执行，请先检查文件或命令结果。"}
+            # 单独任务的名称包含恢复批次，上一批次的允许不能复用到下一次未知结果。
+            @task(name=f"confirm_interrupted_{suffix.replace('-', '')}")
+            async def recovery_choice(data):
+                sink("approval_requested", data)
+                choice = interrupt(data)
+                if choice not in data["options"]:
+                    raise ValueError("无效恢复决定")
+                return choice
+            decision = await recovery_choice(recovery)
+            sink("approval_result", {"id": recovery["id"], "tool_call_id": call_id,
+                                     "status": "denied" if decision == "deny" else "approved", "decision": decision})
+            if decision == "deny":
+                plan = "deny"
+        if plan == "deny":
+            result = ToolResult("denied", restriction or "用户拒绝执行")
+        else:
+            # 委托节点本身没有外部副作用，子图工具各自有日志。
+            if tool != "DelegateToSubagent":
+                self.tool_log.append({"event": "intent", "thread_id": thread_id, "run_id": run_id,
+                                      "tool_call_id": call_id, "tool": tool, "args": args, "idempotency_key": key,
+                                      "timestamp": datetime.now().astimezone().isoformat()})
+            cancelled = False
+            try:
+                if tool == "DelegateToSubagent":
+                    result_data = await self.subagent_manager.run(
+                        task=str(args.get("task", "")), allowed_tools=args.get("allowed_tools"),
+                        budget=args.get("budget", 4), thread_id=thread_id, emit=sink,
+                        subagent_id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"{run_id}:{call_id}:subagent")),
+                        project_root=str(manager.workspace), native_graph=True, run_id=run_id,
+                    )
+                    result = ToolResult("success" if result_data["status"] == "completed" else "failed", result_data["output"])
+                elif tool == "Bash":
+                    result = await self._native_bash(args, str(manager.workspace))
+                else:
+                    task = asyncio.create_task(self._execute_tool(tool, args, thread_id, sink, str(manager.workspace)))
+                    try:
+                        result = await asyncio.shield(task)
+                    except asyncio.CancelledError:
+                        # 同步文件写入/入库无法强杀；等它结束并记下结果，避免恢复时重复写。
+                        result = await task
+                        cancelled = True
+            except GraphBubbleUp:
+                raise
+            except asyncio.CancelledError:
+                self._finish(sink, thread_id=thread_id, run_id=run_id, tool_call_id=call_id,
+                             idempotency_key=key, status="interrupted", output="执行已取消，请检查结果", backup_id=None)
+                raise
+            except Exception as exc:
+                result = ToolResult("failed", str(exc))
+        self._finish(sink, thread_id=thread_id, run_id=run_id, tool_call_id=call_id, idempotency_key=key,
+                     status=result.status, output=result.output, backup_id=result.backup_id)
+        if plan != "deny" and cancelled:
+            raise asyncio.CancelledError
+        return {"status": result.status, "output": result.output, "backup_id": result.backup_id, "tool_call_id": call_id}
+
     async def execute(
         self,
         *,
@@ -220,12 +386,15 @@ class ToolRuntime:
         emit: Emit | None = None,
         subagent_id: str | None = None,
         project_root: str | None = None,
+        native_graph: bool = False,
     ) -> dict[str, Any]:
         """执行一次工具调用并返回结果摘要。
 
         ``project_root`` 为请求级项目根（每会话工作区目录），
         相对路径解析与 Bash 执行目录基于它；缺省用装配默认。
         """
+        if native_graph:
+            return await self._execute_native(thread_id, run_id, tool, args, tool_call_id, emit, subagent_id, project_root)
         sink = self._sink(thread_id, emit)
         call_id = tool_call_id or str(uuid.uuid4())
         idempotency_key = ToolExecutionLog.idempotency_key(thread_id, tool, args)
@@ -245,9 +414,9 @@ class ToolRuntime:
                 },
             )
             return {
-                "status": "completed",
+                "status": existing.get("status", "failed"),
                 "output": existing.get("output"),
-                "backup_id": None,
+                "backup_id": existing.get("backup_id"),
                 "tool_call_id": call_id,
             }
 
@@ -325,6 +494,7 @@ class ToolRuntime:
 
         if plan == "approval":
             approval = self.approval_manager.request(thread_id, tool, args, subagent_id=subagent_id)
+            approval.tool_call_id = call_id  # 审批与执行使用同一调用 ID，界面才能更新正确步骤。
             approval_data: dict[str, Any] = {
                 "id": approval.id,
                 "thread_id": thread_id,

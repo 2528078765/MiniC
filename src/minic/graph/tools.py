@@ -14,6 +14,7 @@ class ToolSpec:  # 工具定义
     description: str  # 工具描述
     args_schema: dict[str, Any]  # 参数 schema
     category: str  # "read" | "write"
+    json_schema: dict[str, Any] | None = None
 
 
 _TOOL_REGISTRY: dict[str, ToolSpec] = {  # 工具注册表
@@ -151,6 +152,7 @@ def register_mcp_tools(mcp_manager: Any) -> int:
             description=schema.get("description", ""),
             args_schema=_json_schema_to_args(schema.get("args_schema") or {}),
             category="mcp",
+            json_schema=schema.get("args_schema") or None,
         )
     _MCP_TOOLS.clear()
     _MCP_TOOLS.update(registered)

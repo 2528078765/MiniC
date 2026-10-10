@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QTransform
 from PySide6.QtWidgets import (
     QFrame,
@@ -39,6 +39,8 @@ _STATUS_STYLE = {
     "approved": (COLOR_GREEN, "已批准"),
     "expired": (COLOR_SHIELD, "审批超时"),
     "cancelled": (COLOR_RED, "已取消"),
+    "interrupted": (COLOR_SHIELD, "已中断"),
+    "pending": (COLOR_ACCENT, "准备执行"),
 }
 
 # 工具名 → (图标, 动作词)；“动作词 + 目标”组成一行描述
@@ -54,7 +56,18 @@ _TOOL_META: dict[str, tuple[str, str]] = {
     "GitStatus": ("⎇", "Git 状态"),
     "GitDiff": ("⎇", "Git 差异"),
     "DelegateToSubagent": ("🤖", "子智能体"),
+    "Lint": ("", "检查语法"),
+    "Format": ("", "格式化"),
+    "ReadMemory": ("", "读取记忆"),
+    "GitLog": ("", "查看提交记录"),
+    "GitCommit": ("", "提交更改"),
+    "GitBranch": ("", "创建分支"),
 }
+
+
+_TOOL_ICONS = {"Read": "文件夹", "Write": "新建", "Edit": "工具", "TextSearch": "搜索",
+               "RAGQuery": "知识库", "RAGSearch": "知识库", "IngestDirectory": "导入",
+               "DelegateToSubagent": "子智能体", "ReadMemory": "记忆"}
 
 
 def format_args(args: dict[str, Any] | None) -> str:
@@ -84,6 +97,12 @@ def summarize_tool(tool: str, args: dict[str, Any] | None) -> str:
     if tool == "TextSearch":
         query = args.get("query") or args.get("pattern") or ""
         return query if query else "搜索文本"
+    if tool == "ReadMemory":
+        return str(args.get("topic") or "")
+    if tool == "DelegateToSubagent":
+        return str(args.get("task") or "")
+    if tool == "GitBranch":
+        return str(args.get("name") or args.get("branch") or "")
     target = (
         args.get("path")
         or args.get("file_path")
@@ -102,6 +121,9 @@ class ToolCard(QFrame):
     头部：图标 + 动作描述 + 状态徽标，点击头部展开参数与输出详情。
     ``set_result(status, output)`` 更新工具结果状态。
     """
+
+    changed = Signal()
+    toggled = Signal()
 
     def __init__(
         self,
@@ -141,13 +163,17 @@ class ToolCard(QFrame):
         header_layout.addWidget(chevron)
 
         icon, action = _TOOL_META.get(tool, ("🛠", tool))
-        icon_label = QLabel(icon, header)
+        icon_label = QLabel(header)
+        icon_label.setPixmap(load_pixmap(_TOOL_ICONS.get(tool, "工具"), 14))
         icon_label.setStyleSheet("background: transparent; border: none;")
         header_layout.addWidget(icon_label)
 
         target = summarize_tool(tool, args)
         text = f"{action} {target}" if target else f"{action}"
+        self.description = text
         name = QLabel(text, header)
+        name.setTextFormat(Qt.TextFormat.PlainText)
+        name.setWordWrap(True)
         name.setStyleSheet(
             f"color: {COLOR_TEXT_SECONDARY}; background: transparent; border: none; font-size: 12px;"
         )
@@ -198,8 +224,9 @@ class ToolCard(QFrame):
         self._chevron = chevron
         header.clicked.connect(self._toggle)
         # 构造即「执行中」：转圈 + 执行中字样（tool_call 事件到达即开始执行）
-        self._update_status("running", output)
-        self._spinner.start()
+        self._update_status(status or "pending", output)
+        if status in ("pending", "running", "awaiting", "approved"):
+            self._spinner.start()
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
 
     def _toggle(self) -> None:
@@ -207,6 +234,7 @@ class ToolCard(QFrame):
         self._expanded = not self._expanded
         self._body.setVisible(self._expanded)
         self._chevron.setPixmap(chevron_pixmap(not self._expanded))
+        self.toggled.emit()
 
     def mark_awaiting(self) -> None:
         """进入等待审批状态（转圈继续，文案变「需审批」）。"""
@@ -227,8 +255,10 @@ class ToolCard(QFrame):
 
     def _update_status(self, status: str, output: str | None = None) -> None:
         """渲染状态徽标。"""
+        self.status = status
         color, text = _STATUS_STYLE.get(status, (COLOR_TEXT_MUTED, status or "执行中"))
         self._status_label.setText(f"<span style='color:{color};font-size:11px;'>{text}</span>")
         if output:
             self._output_label.setText(output)
             self._output_label.show()
+        self.changed.emit()

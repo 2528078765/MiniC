@@ -225,8 +225,8 @@ class ModelRegistry:
     def __init__(self, models: dict[str, Any], default_name: str) -> None:
         self._models = models  # name -> 模型实例（仅启用模型）
         self._default_name = default_name  # 缺省模型名
-        self._ctx: contextvars.ContextVar[str] = contextvars.ContextVar(  # 请求级模型选择
-            "current_model", default=default_name
+        self._ctx: contextvars.ContextVar[str | None] = contextvars.ContextVar(  # 请求级模型选择
+            "current_model", default=None
         )
 
     def update(self, settings: AppSettings) -> None:
@@ -240,8 +240,6 @@ class ModelRegistry:
             return
         self._models = models
         self._default_name = default_name
-        if self._ctx.get() not in self._models:  # 当前请求模型已禁用时回退默认
-            self._ctx.set(default_name)
 
     def use(self, name: str) -> contextvars.Token:
         """选择当前请求使用的模型，返回恢复 token。"""
@@ -268,7 +266,7 @@ class ModelRegistry:
         """
         if not self._models:
             raise RuntimeError("未配置任何模型，请先在「设置 → 模型设置」中添加模型供应商")
-        name = self._ctx.get()
+        name = self._ctx.get() or self._default_name
         return self._models.get(name) or self._models[self._default_name]
 
     def names(self) -> list[str]:

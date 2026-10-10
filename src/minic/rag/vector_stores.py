@@ -259,7 +259,8 @@ class MilvusVectorStore(VectorStore):
                 VectorHit(
                     chunk_id=entity["id"],
                     metadata=metadata,
-                    distance=float(hit.get("distance", 0.0)),
+                    # Milvus 的 COSINE 返回相似度（越大越相似），统一接口需要余弦距离。
+                    distance=1.0 - float(hit["distance"]),
                 )
             )
         return hits

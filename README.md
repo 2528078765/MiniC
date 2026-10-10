@@ -4,18 +4,20 @@ MiniC 是一个本地的 AI 知识助手（DeepAgent）：支持向量化存储�
 
 MiniC 提供桌面端：从 Releases 下载安装包，安装即用。
 
-下载方式：[最新版本下载](https://github.com/2528078765/MiniC/releases/latest)（`MiniC-Setup-0.11.exe`，Windows 10/11 x64）
+下载方式：[最新版本下载](https://github.com/2528078765/MiniC/releases/latest)（`MiniC-Setup-0.12.3.exe`，Windows 10/11 x64）
 
 > English README: [README.en.md](README.en.md)
 
 ## 安装方式
 
-1. 下载 `MiniC-Setup-0.11.exe`，双击安装：自动创建开始菜单与桌面快捷方式，附卸载程序；默认免管理员安装到用户目录，也可选择安装给所有用户。
+1. 下载 `MiniC-Setup-0.12.3.exe`，双击安装：自动创建开始菜单与桌面快捷方式，附卸载程序；默认免管理员安装到用户目录，也可选择安装给所有用户。
 2. 安装完成后双击 MiniC 图标启动：**核心服务内嵌在桌面端进程内自动拉起**，不需要命令行、不需要单独启动任何服务。
 3. 首次启动自动生成 `~/.minic/minic.json`（完整默认配置模板，含全部字段）——**无需手写配置**；在设置里配置 API Key 后即可使用（见「配置 API Key」）。
 4. 数据目录：`~/.minic/`（配置、RAG 索引、记忆、日志），安装目录只放程序本体。
 
 ## 功能特性
+
+- **任务执行过程**：聊天中实时展示执行说明与工具步骤，支持查看参数、输出和审批状态；结束后自动收起，保留步骤数、结果与用时。最终答复单独展示实际完成的工作、限制与下一步，支持 Markdown 和复制；重新打开会话可回看执行记录。
 
 - **RAG 知识库问答**：支持 Markdown / TXT / JSON / HTML / PDF 多格式入库，向量化存储 + 混合检索，回答带来源（见「RAG」）。
 - **本地工具与审批**：文件 / Git / 命令工具，写操作先备份、敏感操作审批（见「工具与审批」）。
@@ -34,7 +36,7 @@ MiniC 的总图由 LangGraph 编排：`route` 路由节点按意图分流到知�
 ## 环境要求
 
 - 桌面端（安装包）：Windows 10/11 x64，**无需安装 Python**。
-- 源码运行：Python 3.13 或更高（开发环境为 Python 3.14），依赖见 `pyproject.toml`；安装后运行 `python -m minic.gui.app` 启动桌面端。
+- 源码运行：Python 3.13 或更高（开发环境为 Python 3.14），桌面版安装命令为 `python -m pip install -e ".[gui]"`；安装后运行 `python -m minic.gui.app` 启动桌面端。
 - 大模型与 Embedding 需要 API Key；Ollama 等本地服务免 Key。
 - 单元测试使用 mock 模型与 mock embedding，不依赖外部服务。
 
@@ -203,7 +205,7 @@ MCP 服务配置位于用户级 `~/.minic/mcp/minic_mcp_settings.json`：
 | GET | `/agents` | 最近子任务列表 |
 | GET | `/agents/{subagent_id}` | 单个子任务状态 |
 
-`POST /chat/stream` 的 SSE 事件序列：`message_start` → `token` → `tool_call` →（`approval_requested` → `approval_result`）→ `tool_result` → `message_end` → `done`；`done` 事件的 `sources` 字段供展示来源。
+`POST /chat/stream` 的 SSE 事件序列：`message_start` → `token` → `tool_call` →（`approval_requested` → `approval_result`）→ `tool_result` → `answer` → `message_end` → `done`。工具与 token 事件可循环出现；`token.channel` 为 `activity`（公开执行说明）或 `answer`（答复），旧客户端仍可读取 `delta`。`answer.text` 为权威最终答复，桌面端整体替换结果区避免重复拼接；`done.sources` 供展示来源。
 
 ## 配置
 

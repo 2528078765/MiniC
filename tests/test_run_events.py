@@ -347,6 +347,7 @@ def test_cancel_stops_streaming_with_cancelled_events(tmp_path: Path) -> None:
     """取消后流不再发新 token，收到 message_end(cancelled)+done(cancelled) 关闭。"""
     app, _ = _slow_app(tmp_path)
     client = TestClient(app)
+    client.__enter__()
     events: list[tuple[str, dict]] = []
 
     def stream_thread() -> None:
@@ -386,6 +387,8 @@ def test_cancel_stops_streaming_with_cancelled_events(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------- 核心重启：interrupted
+
+    client.__exit__(None, None, None)
 
 
 def test_events_interrupted_after_restart(tmp_path: Path) -> None:

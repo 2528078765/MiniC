@@ -5,6 +5,8 @@ from __future__ import annotations  # 延迟注解求值
 from typing import Any  # 任意类型
 
 from langgraph.checkpoint.memory import MemorySaver  # 轻量内存 checkpointer
+from langgraph.types import RetryPolicy, TimeoutPolicy
+from minic.graph.policies import READ_RETRY
 from langgraph.graph import END, StateGraph  # LangGraph 图组件
 
 from minic.graph.action.action_graph import build_action_graph  # 动作子图构建
@@ -22,6 +24,7 @@ def build_super_graph(  # 构建总图
     settings: Any = None,  # 应用配置
     tool_runtime: Any = None,  # 共享工具执行核心
     skill_manager: Any = None,  # SKILL 管理器
+    checkpointer: Any = None,
 ):  # 返回编译后的总图
     """总图：路由 -> 知识库子图 / 动作子图。"""  # 函数说明
     async def route_node_call(state: ChatState) -> dict[str, Any]:  # 路由节点闭包
@@ -36,10 +39,15 @@ def build_super_graph(  # 构建总图
     action_subgraph = build_action_graph(rag_store, chat_model, memory_store, settings, tool_runtime, skill_manager)  # 构建动作子图
 
     builder = StateGraph(ChatState)  # 创建总图构建器
-    builder.add_node("route", route_node_call)  # 注册路由节点
+    from minic.graph.common import prepare_context
+    async def context_node(state: ChatState) -> dict[str, Any]:
+        return await prepare_context(state, chat_model, settings)
+    builder.add_node("prepare_context", context_node, timeout=TimeoutPolicy(run_timeout=180))
+    builder.add_node("route", route_node_call, timeout=TimeoutPolicy(run_timeout=180), retry_policy=READ_RETRY)  # 注册路由节点
     builder.add_node("knowledge", knowledge_subgraph)  # 注册知识子图
     builder.add_node("action", action_subgraph)  # 注册动作子图
-    builder.set_entry_point("route")  # 设置入口为路由
+    builder.set_entry_point("prepare_context")
+    builder.add_edge("prepare_context", "route")
     builder.add_conditional_edges(  # 按意图分流
         "route",  # 路由节点
         lambda state: state.get("intent", "knowledge"),  # 读取意图
@@ -51,7 +59,7 @@ def build_super_graph(  # 构建总图
     )  # 分流结束
     builder.add_edge("knowledge", END)  # 知识子图结束
     builder.add_edge("action", END)  # 动作子图结束
-    return builder.compile(checkpointer=MemorySaver())  # 轻量 checkpointer：图状态内存中可恢复（规格书 4.1）
+    return builder.compile(checkpointer=checkpointer if checkpointer is not None else MemorySaver())  # 轻量 checkpointer：图状态内存中可恢复（规格书 4.1）
 
 
 def build_chat_graph(  # 兼容旧入口
@@ -61,8 +69,9 @@ def build_chat_graph(  # 兼容旧入口
     settings: Any = None,  # 应用配置
     tool_runtime: Any = None,  # 共享工具执行核心
     skill_manager: Any = None,  # SKILL 管理器
+    checkpointer: Any = None,
 ):  # 返回编译后的总图
     """兼容旧入口，等价于总图 + 子图架构。"""  # 函数说明
     return build_super_graph(  # 直接复用总图构建
-        rag_store, chat_model, memory_store, settings, tool_runtime, skill_manager
+        rag_store, chat_model, memory_store, settings, tool_runtime, skill_manager, checkpointer
     )

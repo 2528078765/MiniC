@@ -1,6 +1,7 @@
 """S0 健康检查测试。"""
 
 from fastapi.testclient import TestClient
+from minic import __version__
 
 
 def test_health_returns_ok(client: TestClient) -> None:
@@ -10,7 +11,7 @@ def test_health_returns_ok(client: TestClient) -> None:
     data = response.json()
     assert data["status"] == "ok"
     assert data["pid"] > 0
-    assert data["version"] == "0.11"
+    assert data["version"] == __version__
     assert data["started_at"]
 
 

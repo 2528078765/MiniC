@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import QRectF, Qt, QTimer
+from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QLabel, QWidget
 
 from minic.gui.theme import COLOR_ACCENT
@@ -24,12 +25,13 @@ class SpinnerLabel(QLabel):
         self._timer.setInterval(120)
         self._timer.timeout.connect(self._advance)
         self._index = 0
+        self.setFixedSize(16, 16)
         self.hide()
 
     def start(self) -> None:
         """开始旋转。"""
         self._index = 0
-        self.setText(_FRAMES[0])
+        self._paint_frame()
         self.show()
         self._timer.start()
 
@@ -41,4 +43,16 @@ class SpinnerLabel(QLabel):
     def _advance(self) -> None:
         """轮换到下一帧。"""
         self._index = (self._index + 1) % len(_FRAMES)
-        self.setText(_FRAMES[self._index])
+        self._paint_frame()
+
+    def _paint_frame(self) -> None:
+        pixmap = QPixmap(16, 16)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        pen = QPen(QColor(COLOR_ACCENT), 1.6)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(pen)
+        painter.drawArc(QRectF(3, 3, 10, 10), (-self._index * 90) * 16, 260 * 16)
+        painter.end()
+        self.setPixmap(pixmap)

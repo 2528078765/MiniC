@@ -38,6 +38,7 @@ class CoreClient(QObject):
     unauthorized = Signal()                        # 令牌失效，需重新读取 runtime
     chat_event = Signal(str, dict)                 # SSE 事件 (event_name, data)，data 带 _run
     chat_error = Signal(str, str)                  # 聊天/SSE 错误 (message, run_key)
+    chat_stream_closed = Signal(str)               # HTTP 响应已关闭，才能开始后续恢复流
     request_error = Signal(str, dict)              # (操作名, 错误详情)
 
     def __init__(self, parent: QObject | None = None) -> None:
@@ -193,6 +194,7 @@ class CoreClient(QObject):
         message: str,
         model: str | None = None,
         run_key: str = "",
+        resume: bool = False,
     ) -> None:
         """POST /chat/stream 并消费 SSE，逐事件发 chat_event 信号。
 
@@ -205,6 +207,7 @@ class CoreClient(QObject):
             "workspace": workspace,
             "message": message,
             "model": model,
+            "resume": resume,
         }
         try:
             # 必须用 with 打开流式响应（client.stream() 只有进入 with 才会真正
@@ -227,6 +230,12 @@ class CoreClient(QObject):
                         if self._handle_unauthorized(response):
                             self.chat_error.emit("登录状态失效", run_key)
                             return
+                        if response.is_error:
+                            response.read()  # 流式错误响应需要先读取响应体。
+                            detail = _error_detail(response)
+                            if detail:
+                                self.chat_error.emit(f"HTTP {response.status_code}: {detail}", run_key)
+                                return
                         response.raise_for_status()
                         event_name: str | None = None
                         data_lines: list[str] = []
@@ -249,6 +258,8 @@ class CoreClient(QObject):
                         return  # 成功消费完，退出（不重试）
         except httpx.HTTPError as exc:
             self.chat_error.emit(str(exc), run_key)  # 连接失败/超时必报错，转圈不会无限
+        finally:
+            self.chat_stream_closed.emit(run_key)
     # ---- 常用 API 快捷方法 ----
 
     def get_settings(self) -> dict[str, Any] | None:

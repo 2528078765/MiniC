@@ -105,6 +105,9 @@ def test_graph_builders_return_compiled_graphs(tmp_path: Path) -> None:
     assert build_action_graph(rag_store, model, memory_store, settings) is not None
     assert build_super_graph(rag_store, model, memory_store, settings) is not None
     assert build_chat_graph(rag_store, model, memory_store, settings) is not None
+    from langgraph.checkpoint.memory import InMemorySaver
+    saver = InMemorySaver()
+    assert build_chat_graph(rag_store, model, memory_store, settings, checkpointer=saver).checkpointer is saver
 
 
 def test_knowledge_behavior_keeps_sources(tmp_path: Path) -> None:
@@ -135,7 +138,7 @@ def test_knowledge_behavior_keeps_sources(tmp_path: Path) -> None:
     assert final["sources"]
     assert final["sources"][0]["file_path"].endswith("guide.md")
     assert not (tmp_path / "global-memory" / "minic.md").exists()
-    assert not (tmp_path / ".minic" / "memory" / "minic.md").exists()
+    assert not (tmp_path / "Agent.md").exists()
 
 
 def test_personal_info_writes_global_memory(tmp_path: Path) -> None:
@@ -154,11 +157,12 @@ def test_personal_info_writes_global_memory(tmp_path: Path) -> None:
             },
         )
     )
-    assert final["answer"] == "好的，我记住了。"
+    assert final["answer"] == final["confirmation"]
+    assert final["answer"].startswith("已保存：")
     content = (tmp_path / "global-memory" / "minic.md").read_text(encoding="utf-8")
     assert "姓名" in content
     assert "李四" in content
-    assert not (tmp_path / ".minic" / "memory" / "minic.md").exists()
+    assert not (tmp_path / "Agent.md").exists()
 
 
 def test_project_info_writes_project_memory(tmp_path: Path) -> None:
@@ -180,8 +184,9 @@ def test_project_info_writes_project_memory(tmp_path: Path) -> None:
             },
         )
     )
-    assert final["answer"] == "好的，我记住了。"
-    content = (tmp_path / ".minic" / "memory" / "minic.md").read_text(encoding="utf-8")
+    assert final["answer"] == final["confirmation"]
+    assert final["answer"].startswith("已保存：")
+    content = (tmp_path / "Agent.md").read_text(encoding="utf-8")
     assert "项目约定" in content
     assert "Python" in content
     assert not (tmp_path / "global-memory" / "minic.md").exists()

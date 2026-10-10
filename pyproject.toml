@@ -4,12 +4,13 @@ build-backend = "hatchling.build"
 
 [project]
 name = "minic"
-version = "0.11"
+version = "0.12.3"
 description = "MiniC 本地优先 DeepAgent：RAG 知识库问答、文件/Git/命令工具与审批、会话与长期记忆、MCP/SKILL/子 Agent、崩溃恢复"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
-    "langgraph>=0.2.60",
+    "langgraph>=1.2.10,<2",
+    "langgraph-checkpoint-sqlite>=3.1.1,<4",
     "langchain>=1.0.0",
     "langchain-core>=0.3.50",
     "langchain-deepseek>=0.1.0",
@@ -28,6 +29,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+gui = [
+    "PySide6>=6.8",
+]
 dev = [
     "pytest>=8.0.0",
     "pytest-cov>=6.0.0",

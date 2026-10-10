@@ -17,7 +17,7 @@ from rank_bm25 import BM25Okapi
 from minic.core.config import AppSettings
 from minic.rag.chunker import chunk_text
 from minic.rag.embeddings import EmbeddingProvider
-from minic.rag.parser import parse_document
+from minic.rag.parser import MARKDOWN_PARSER_VERSION, parse_document
 from minic.rag.vector_stores import create_vector_store
 
 
@@ -264,11 +264,35 @@ class RagStore:
                 chunk_index += 1
         return chunks
 
+    def _processing_signature(self, file_path: Path) -> str:
+        """Index identity includes extraction and chunk rules, not credentials."""
+        return _sha256(json.dumps({
+            "parser": MARKDOWN_PARSER_VERSION if file_path.suffix.lower() == ".md" else "document-v1",
+            "chunker": "character-window-preserve-indent-v2",
+            "size": self.settings.rag.chunk_size,
+            "overlap": self.settings.rag.chunk_overlap,
+        }, sort_keys=True))
+
+    def _embedding_signature(self) -> str:
+        embedding = self.settings.embedding
+        return _sha256(json.dumps({"provider": embedding.provider, "model": embedding.model,
+            "base_url": embedding.base_url.rstrip("/"), "dimension": embedding.dimension}, sort_keys=True))
+
+    @staticmethod
+    def _same_chunks(old: list[dict[str, Any]], new: list[dict[str, Any]]) -> bool:
+        """Reuse existing vectors only when searchable content and IDs agree."""
+        fields = ("chunk_id", "doc_id", "source", "file_path", "title", "section", "text", "page")
+        old_by_id = {c["chunk_id"]: c for c in old}
+        return len(old) == len(new) and all(
+            c["chunk_id"] in old_by_id and all(old_by_id[c["chunk_id"]].get(f) == c.get(f) for f in fields)
+            for c in new)
+
     def ingest_directory(
         self,
         path: str,
         extensions: list[str] | None = None,
         source: str | None = None,
+        refresh_processing: bool = True,
     ) -> IngestResult:
         """入库一个文档文件或文件夹（Markdown/TXT/HTML/PDF 等），返回统计结果。
 
@@ -288,9 +312,11 @@ class RagStore:
 
         effective_source = source or _sha256(os.path.normcase(str(root)))[:16]
         with self._ingest_locks.setdefault(effective_source, threading.Lock()):
-            return self._ingest_directory_unlocked(root=root, files=files, effective_source=effective_source)
+            return self._ingest_directory_unlocked(root=root, files=files, effective_source=effective_source,
+                refresh_processing=refresh_processing)
 
-    def _ingest_directory_unlocked(self, root: Path, files: list[Path], effective_source: str) -> IngestResult:
+    def _ingest_directory_unlocked(self, root: Path, files: list[Path], effective_source: str,
+                                   refresh_processing: bool = True) -> IngestResult:
         """在持有 effective_source 锁的前提下执行增量入库。
 
         文件解析/跳过判断在 per-source 锁内完成；索引与 metadata 提交阶段持全局提交锁并
@@ -301,11 +327,17 @@ class RagStore:
         changed_chunks: list[dict[str, Any]] = []
         changed_doc_ids: set[str] = set()
         new_documents: list[dict[str, Any]] = []
+        metadata_updates: dict[str, dict[str, Any]] = {}
+        old_chunks_by_doc: dict[str, list[dict[str, Any]]] = {}
+        available_vector_ids: set[str] | None = None
+        for chunk in self._bm25_chunks:
+            old_chunks_by_doc.setdefault(chunk["doc_id"], []).append(chunk)
         ingested = 0
         skipped = 0
         failed: list[dict[str, str]] = []
         embedded_at = datetime.now().astimezone().isoformat()
         embedding_model = f"{self.settings.embedding.provider}/{self.settings.embedding.model}"
+        embedding_signature = self._embedding_signature()
 
         for file_path in files:
             try:
@@ -318,10 +350,29 @@ class RagStore:
                 )
                 doc_id = _sha256(f"{effective_source}:{display_path}")
                 existing = source_documents.get(doc_id)
-                if existing and existing.get("hash") == file_hash:
+                processing_signature = self._processing_signature(file_path)
+                embedding_matches = bool(existing and (
+                    existing.get("embedding_signature") == embedding_signature
+                    if existing.get("embedding_signature") else existing.get("embedding_model") == embedding_model))
+                unchanged = bool(existing and existing.get("hash") == file_hash)
+                # Startup scans must not silently initiate a paid, full-vault
+                # migration after a software/configuration upgrade. Manual
+                # ingest refreshes rules by default and keeps signatures honest.
+                if unchanged and not refresh_processing:
+                    skipped += 1
+                    continue
+                if unchanged and embedding_matches and existing.get("processing_signature") == processing_signature:
                     skipped += 1
                     continue
                 chunks = self._chunks_for_documents(file_path, effective_source, doc_id, file_hash)
+                if unchanged and embedding_matches and self._same_chunks(old_chunks_by_doc.get(doc_id, []), chunks):
+                    if available_vector_ids is None:
+                        available_vector_ids = {row["id"] for row in self._vector_store.export_all()}
+                    if all(c["chunk_id"] in available_vector_ids for c in chunks):
+                        metadata_updates[doc_id] = {**existing, "processing_signature": processing_signature,
+                            "embedding_signature": embedding_signature}
+                        skipped += 1
+                        continue
                 if not chunks:
                     continue
                 changed_chunks.extend(chunks)
@@ -339,6 +390,8 @@ class RagStore:
                         "chunk_count": len(chunks),
                         "chunk_ids": [chunk["chunk_id"] for chunk in chunks],
                         "embedding_model": embedding_model,
+                        "processing_signature": processing_signature,
+                        "embedding_signature": embedding_signature,
                         "embedded_at": embedded_at,
                     }
                 )
@@ -356,6 +409,8 @@ class RagStore:
                 [chunk["text"] for chunk in changed_chunks],
                 text_type="document",
             )
+            if len(embeddings) != len(changed_chunks) or any(not vector for vector in embeddings):
+                raise ValueError("Embedding 返回数量或向量为空，旧索引未更新")
             with self._commit_lock:
                 current_documents = self._load_documents()  # 提交前重新读取，合并其他 source 的并发提交
                 old_documents = [doc for doc in current_documents if doc.get("source") != effective_source]
@@ -379,13 +434,13 @@ class RagStore:
                 self._bm25 = None
                 final_documents = (
                     old_documents
-                    + [doc for doc_id, doc in current_source.items() if doc_id not in changed_doc_ids]
+                    + [metadata_updates.get(doc_id, doc) for doc_id, doc in current_source.items() if doc_id not in changed_doc_ids]
                     + new_documents
                 )
                 self._persist_documents(final_documents)
-        elif not self.metadata_path.exists():
+        elif metadata_updates or not self.metadata_path.exists():
             with self._commit_lock:
-                self._persist_documents(self._load_documents())
+                self._persist_documents([metadata_updates.get(doc["doc_id"], doc) for doc in self._load_documents()])
 
         return IngestResult(ingested=ingested, skipped=skipped, failed=failed)
 

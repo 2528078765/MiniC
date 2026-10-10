@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -22,19 +23,36 @@ def _sha256(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
+def _markdown_headings(lines: list[str]) -> list[tuple[int, int, str]]:
+    """识别真实标题，代码围栏内的注释不是记忆主题。"""
+    headings = []
+    fence = None
+    for index, line in enumerate(lines):
+        marker = re.match(r"^ {0,3}(`{3,}|~{3,})", line)
+        if marker:
+            token = marker.group(1)
+            if fence is None:
+                fence = token
+            elif token[0] == fence[0] and len(token) >= len(fence):
+                fence = None
+            continue
+        match = re.match(r"^ {0,3}(#{1,6})\s+(.+?)\s*$", line)
+        if match and fence is None:
+            headings.append((index, len(match.group(1)), match.group(2)))
+    return headings
+
+
 def parse_topics(content: str) -> dict[str, str]:
-    """把 Markdown 记忆解析成主题字典。"""
-    topics: dict[str, list[str]] = {}
-    current_topic: str | None = None
-    for line in content.splitlines():
-        if line.startswith("#"):
-            current_topic = line.lstrip("#").strip()
-            topics.setdefault(current_topic, [])
-        elif current_topic is not None:
-            topics[current_topic].append(line)
-    if not topics and content.strip():
-        topics["未分类"] = [content.strip()]
-    return {topic: "\n".join(lines).strip() for topic, lines in topics.items()}
+    """把 Markdown 记忆解析成主题字典，保留代码内注释。"""
+    lines = content.splitlines(keepends=True)
+    headings = _markdown_headings(lines)
+    if not headings:
+        return {"未分类": content.strip()} if content.strip() else {}
+    topics = {}
+    for position, (start, _, topic) in enumerate(headings):
+        end = headings[position + 1][0] if position + 1 < len(headings) else len(lines)
+        topics[topic] = "".join(lines[start + 1:end]).strip()
+    return topics
 
 
 def render_topics(topics: dict[str, str]) -> str:
@@ -46,6 +64,20 @@ def render_topics(topics: dict[str, str]) -> str:
             block = f"{block}\n{content}"
         blocks.append(block)
     return "\n\n".join(blocks).strip()
+
+def update_topic_markdown(existing: str, topic: str, content: str | None) -> str:
+    """只改一个主题，保留人工编辑的前言、其他标题和代码块。"""
+    lines = existing.splitlines(keepends=True)
+    headings = _markdown_headings(lines)
+    target = next((item for item in headings if item[2] == topic), None)
+    if target:
+        start, level, _ = target
+        end = next((index for index, _, _ in headings if index > start), len(lines))
+        replacement = f"{'#' * level} {topic}\n{content}\n\n" if content is not None else ""
+        return "".join(lines[:start]) + replacement + "".join(lines[end:])
+    if content is None:
+        return existing
+    return f"{existing.rstrip()}\n\n# {topic}\n{content}".lstrip()
 
 
 class LongTermMemoryStore:
@@ -65,7 +97,24 @@ class LongTermMemoryStore:
 
     def _memory_path(self, directory: Path) -> Path:
         """返回记忆 Markdown 文件路径。"""
-        return directory / "minic.md"
+        if directory == self.global_dir:
+            return directory / "minic.md"
+        return directory.parent.parent / "Agent.md"
+
+    def ensure_project(self, workspace: str | None = None) -> Path:
+        """仅为当前使用的项目创建可编辑记忆；已有文件不覆盖。"""
+        directory = self._dir_for("project", workspace)
+        path = self._memory_path(directory)
+        if not path.exists():
+            legacy = directory / "minic.md"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            content = legacy.read_text(encoding="utf-8") if legacy.exists() else "# 项目长期记忆\n\n在此记录项目约定、偏好和可复用信息。MiniC 每轮对话重新读取本文件。\n"
+            try:
+                with path.open("x", encoding="utf-8") as file:
+                    file.write(content)
+            except FileExistsError:
+                pass
+        return path
 
     def _meta_path(self, directory: Path) -> Path:
         """返回记忆元数据文件路径。"""
@@ -75,13 +124,18 @@ class LongTermMemoryStore:
         """读取记忆文件原始内容。"""
         path = self._memory_path(directory)
         if not path.exists():
-            return ""
-        return path.read_text(encoding="utf-8").strip()
+            path = directory / "minic.md"  # 老项目只读兼容，正式使用时迁移。
+            if not path.exists():
+                return ""
+        return path.read_text(encoding="utf-8-sig").strip()
 
     def _write_raw(self, directory: Path, content: str) -> None:
         """原子写入记忆文件。"""
         directory.mkdir(parents=True, exist_ok=True)
         path = self._memory_path(directory)
+        if directory != self.global_dir and path.exists() and path.read_text(encoding="utf-8") != content:
+            from minic.backups import write_file_backup
+            write_file_backup(directory.parent / "backups" / "files", path)
         tmp_path = path.with_suffix(".tmp")
         tmp_path.write_text(content, encoding="utf-8")
         tmp_path.replace(path)
@@ -141,7 +195,8 @@ class LongTermMemoryStore:
             content = "\n\n".join(part for part in (global_content, project_content) if part).strip()
         else:
             raise ValueError(f"不支持的作用域: {scope}")
-        return {"scope": scope, "content": content, "version": _sha256(content)}
+        path = self._memory_path(self._dir_for(scope, workspace)) if scope != "merged" else self._memory_path(self._dir_for("project", workspace))
+        return {"scope": scope, "content": content, "version": _sha256(content), "path": str(path)}
 
     def write(
         self,
@@ -162,7 +217,11 @@ class LongTermMemoryStore:
             self._update_meta_sources(directory, parse_topics(new_content), "user")
         elif mode == "merge":
             merged = self._merge_markdown(current, content, directory)
-            new_content = render_topics(merged)
+            new_content = current
+            previous = parse_topics(current)
+            for topic, value in merged.items():
+                if previous.get(topic) != value:
+                    new_content = update_topic_markdown(new_content, topic, value)
             self._update_meta_sources(directory, parse_topics(new_content), "user")
         else:
             raise ValueError(f"不支持的写入模式: {mode}")
@@ -182,7 +241,8 @@ class LongTermMemoryStore:
         entry = meta.get("topics", {}).get(topic, {})
         if entry.get("deleted"):
             return False  # 已删除主题不再重写
-        current_topics = parse_topics(self._read_raw(directory))
+        existing_markdown = self._read_raw(directory)
+        current_topics = parse_topics(existing_markdown)
         existing_content = current_topics.get(topic)
         existing_source = entry.get("source")
         if existing_content == content and existing_source == source:
@@ -192,7 +252,7 @@ class LongTermMemoryStore:
         current_topics[topic] = content
         meta.setdefault("topics", {})[topic] = {"source": source, "deleted": False}
         self._save_meta(directory, meta)
-        self._write_raw(directory, render_topics(current_topics))  # 渲染 Markdown 后落盘
+        self._write_raw(directory, update_topic_markdown(existing_markdown, topic, content))
         return True
 
     def mark_deleted(self, scope: str, workspace: str | None, topic: str) -> None:
@@ -200,20 +260,18 @@ class LongTermMemoryStore:
         directory = self._dir_for(scope, workspace)
         meta = self._load_meta(directory)
         meta.setdefault("topics", {})[topic] = {"source": "user", "deleted": True}
-        topics = parse_topics(self._read_raw(directory))
-        topics.pop(topic, None)
+        existing = self._read_raw(directory)
         self._save_meta(directory, meta)
-        self._write_raw(directory, render_topics(topics))
+        self._write_raw(directory, update_topic_markdown(existing, topic, None))
 
     def remove_topic(self, scope: str, workspace: str | None, topic: str) -> None:
         """从记忆内容与元数据中彻底移除主题。"""
         directory = self._dir_for(scope, workspace)
         meta = self._load_meta(directory)
         meta.get("topics", {}).pop(topic, None)
-        topics = parse_topics(self._read_raw(directory))
-        topics.pop(topic, None)
+        existing = self._read_raw(directory)
         self._save_meta(directory, meta)
-        self._write_raw(directory, render_topics(topics))
+        self._write_raw(directory, update_topic_markdown(existing, topic, None))
 
     def migrate_project_to_global(
         self,
