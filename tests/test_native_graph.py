@@ -221,10 +221,16 @@ def test_unknown_effect_needs_new_confirmation_after_allow_always(tmp_path):
     asyncio.run(scenario())
 
 def test_cancel_bash_kills_process_and_requires_new_confirmation(tmp_path):
+    import os
+    import shlex
+    import subprocess
+    import sys
+    argv = [sys.executable, '-c', 'import time; time.sleep(30)']
+    command = subprocess.list2cmdline(argv) if os.name == 'nt' else shlex.join(argv)
     class BashModel(ScriptModel):
         async def astream(self, messages):
             if not any(isinstance(item, ToolMessage) for item in messages):
-                yield AIMessageChunk(content="", tool_calls=[{"name": "Bash", "args": {"command": r"C:\Windows\System32\ping.exe -n 30 127.0.0.1 >nul"}, "id": "bash"}])
+                yield AIMessageChunk(content="", tool_calls=[{"name": "Bash", "args": {"command": command}, "id": "bash"}])
             else:
                 yield AIMessageChunk(content="已停止命令")
     async def scenario():
@@ -247,6 +253,7 @@ def test_cancel_bash_kills_process_and_requires_new_confirmation(tmp_path):
                         break
                     await asyncio.sleep(0.01)
                 assert captured
+                assert captured[0].returncode is None
                 await engine.cancel("run-1")
                 events = await asyncio.wait_for(consumption, 5)
                 assert events[-1][1]["status"] == "cancelled", events
